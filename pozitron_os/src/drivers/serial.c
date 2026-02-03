@@ -60,3 +60,29 @@ void serial_puts_num(uint32_t num) {
         serial_write(buf[--i]);
     }
 }
+
+void serial_puts_num_hex(uint32_t num) {
+    char hex[] = "0123456789ABCDEF";
+    
+    // Если число 0
+    if (num == 0) {
+        serial_write('0');
+        return;
+    }
+    
+    // Ищем первую ненулевую цифру
+    char buffer[9];
+    int pos = 0;
+    
+    for (int i = 28; i >= 0; i -= 4) {
+        uint8_t nibble = (num >> i) & 0xF;
+        if (nibble != 0 || pos > 0) {
+            buffer[pos++] = hex[nibble];
+        }
+    }
+    
+    // Выводим
+    for (int i = 0; i < pos; i++) {
+        serial_write(buffer[i]);
+    }
+}

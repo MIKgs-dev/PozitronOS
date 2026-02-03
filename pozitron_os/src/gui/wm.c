@@ -37,6 +37,57 @@ static inline void safe_add_window_to_list(Window* window) {
     gui_state.last_window = window;
 }
 
+// ============ ФУНКЦИЯ ИЗМЕНЕНИЯ РАЗМЕРА ============
+void wm_resize_window(Window* window, uint32_t width, uint32_t height) {
+    if (!IS_VALID_WINDOW_PTR(window) || !window->resizable) return;
+    if (window->minimized || window->maximized) return;
+    
+    uint32_t screen_width = gui_state.screen_width;
+    uint32_t screen_height = gui_state.screen_height;
+    
+    // Ограничиваем минимальный размер
+    if (width < 100) width = 100;
+    if (height < 100) height = 100;
+    
+    // Ограничиваем максимальный размер
+    if (width > screen_width - 50) width = screen_width - 50;
+    if (height > screen_height - TASKBAR_HEIGHT - 50) height = screen_height - TASKBAR_HEIGHT - 50;
+    
+    // Проверяем, что окно не выйдет за пределы экрана
+    if (window->x + width > screen_width) {
+        window->x = screen_width - width;
+    }
+    if (window->y + height > screen_height - TASKBAR_HEIGHT) {
+        window->y = screen_height - TASKBAR_HEIGHT - height;
+    }
+    
+    // Сохраняем старый размер для вычисления дельты виджетов
+    uint32_t old_width = window->width;
+    uint32_t old_height = window->height;
+    
+    // Меняем размер окна
+    window->width = width;
+    window->height = height;
+    
+    // Обновляем все виджеты окна
+    wg_update_all_widgets(window);
+    
+    // Вызываем callback, если он установлен
+    if (window->on_resize) {
+        window->on_resize(window);
+    }
+    
+    window->needs_redraw = 1;
+    
+    serial_puts("[WM] Window resized: ");
+    if (window->title) serial_puts(window->title);
+    serial_puts(" (");
+    serial_puts_num(width);
+    serial_puts("x");
+    serial_puts_num(height);
+    serial_puts(")\n");
+}
+
 // ============ API WINDOW MANAGER ============
 Window* wm_create_window(const char* title, uint32_t x, uint32_t y, 
                         uint32_t width, uint32_t height, uint8_t flags) {
@@ -69,7 +120,7 @@ Window* wm_create_window(const char* title, uint32_t x, uint32_t y,
     window->drag_offset_x = 0;
     window->drag_offset_y = 0;
     window->minimized = 0;
-    window->maximized = 0;                 // НОВОЕ: не максимизировано
+    window->maximized = 0;
     window->first_widget = NULL;
     window->last_widget = NULL;
     window->next = NULL;
@@ -77,15 +128,17 @@ Window* wm_create_window(const char* title, uint32_t x, uint32_t y,
     window->on_close = NULL;
     window->on_focus = NULL;
     window->on_minimize = NULL;
-    window->on_maximize = NULL;            // НОВОЕ: callback максимизации
+    window->on_maximize = NULL;
     window->on_restore = NULL;
+    window->on_resize = NULL; // Callback изменения размера
     window->closable = (flags & WINDOW_CLOSABLE) ? 1 : 0;
     window->movable = (flags & WINDOW_MOVABLE) ? 1 : 0;
     window->resizable = (flags & WINDOW_RESIZABLE) ? 1 : 0;
     window->minimizable = (flags & WINDOW_MINIMIZABLE) ? 1 : 0;
-    window->maximizable = (flags & WINDOW_MAXIMIZABLE) ? 1 : 0; // НОВОЕ: поддержка максимизации
+    window->maximizable = (flags & WINDOW_MAXIMIZABLE) ? 1 : 0;
     window->needs_redraw = 1;
     window->in_taskbar = 1;
+    window->is_resizing = 0;
     
     // Сохраняем оригинальные размеры
     window->orig_x = x;
@@ -93,7 +146,7 @@ Window* wm_create_window(const char* title, uint32_t x, uint32_t y,
     window->orig_width = width;
     window->orig_height = height;
     
-    // Инициализируем нормальные размеры (для максимизации)
+    // Инициализируем нормальные размеры
     window->normal_x = x;
     window->normal_y = y;
     window->normal_width = width;
@@ -263,21 +316,30 @@ void wm_move_window(Window* window, uint32_t x, uint32_t y) {
     uint32_t screen_width = gui_state.screen_width;
     uint32_t screen_height = gui_state.screen_height;
     
-    // Для нормального окна - стандартные ограничения
-    if (!window->maximized) {
-        if (x > screen_width - window->width) {
-            x = screen_width - window->width;
-        }
-        if (y > screen_height - TASKBAR_HEIGHT - window->height) {
-            y = screen_height - TASKBAR_HEIGHT - window->height;
-        }
+    // Ограничения
+    if (x > screen_width - window->width) {
+        x = screen_width - window->width;
     }
+    if (y > screen_height - TASKBAR_HEIGHT - window->height) {
+        y = screen_height - TASKBAR_HEIGHT - window->height;
+    }
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
     
-    // Обновляем позиции виджетов
+    // Обновляем позиции ВСЕХ виджетов
     Widget* widget = window->first_widget;
     while (widget) {
-        widget->x = x + (widget->x - window->x);
-        widget->y = y + (widget->y - window->y);
+        if (!widget->use_relative) {
+            // Для абсолютных координат - сдвигаем вместе с окном
+            widget->x = x + (widget->x - window->x);
+            widget->y = y + (widget->y - window->y);
+        } else {
+            // Для относительных координат - нужно пересчитать абсолютные!
+            // Но rel_x, rel_y остаются теми же относительно нового положения окна
+            // Просто вызываем обновление позиции
+            wg_update_position(widget);
+        }
+        widget->needs_redraw = 1;
         widget = widget->next;
     }
     
@@ -325,14 +387,8 @@ void wm_maximize_window(Window* window) {
     window->movable = 0;      // Максимизированное окно нельзя перемещать
     window->resizable = 0;    // Максимизированное окно нельзя изменять размер
     
-    // Обновляем виджеты
-    Widget* widget = window->first_widget;
-    while (widget) {
-        // Сохраняем относительные позиции (в процентах от размеров окна)
-        // Для простоты - оставляем абсолютные координаты, но можно добавить логику масштабирования
-        widget->needs_redraw = 1;
-        widget = widget->next;
-    }
+    // КРИТИЧНО: Обновляем все виджеты окна!
+    wg_update_all_widgets(window);
     
     window->needs_redraw = 1;
     
@@ -362,7 +418,6 @@ void wm_minimize_window(Window* window) {
         window->orig_y = window->normal_y;
         window->orig_width = window->normal_width;
         window->orig_height = window->normal_height;
-        // Не сбрасываем maximized флаг!
     } else {
         window->orig_x = window->x;
         window->orig_y = window->y;
@@ -406,7 +461,7 @@ void wm_minimize_window(Window* window) {
                    window->width + 10, window->height + 10);
 }
 
-// ============ УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ВОССТАНОВЛЕНИЯ ============
+// ============ ФУНКЦИЯ ВОССТАНОВЛЕНИЯ ============
 void wm_restore_window(Window* window) {
     if (!IS_VALID_WINDOW_PTR(window)) return;
     
@@ -422,7 +477,6 @@ void wm_restore_window(Window* window) {
         window->height = window->orig_height;
         
         // Если окно было максимизировано до минимизации, восстанавливаем максимизацию
-        // Для этого нужно сохранять was_maximized отдельно или проверять нормальные размеры
         if (window->normal_width == gui_state.screen_width && 
             window->normal_height == gui_state.screen_height - TASKBAR_HEIGHT) {
             window->maximized = 1;
@@ -434,14 +488,8 @@ void wm_restore_window(Window* window) {
             window->resizable = window->orig_resizable;
         }
         
-        // Обновляем виджеты
-        Widget* widget = window->first_widget;
-        while (widget) {
-            widget->x = window->x + (widget->x - window->orig_x);
-            widget->y = window->y + (widget->y - window->orig_y);
-            widget->needs_redraw = 1;
-            widget = widget->next;
-        }
+        // КРИТИЧНО: Обновляем все виджеты окна!
+        wg_update_all_widgets(window);
         
         if (window->on_restore) {
             window->on_restore(window);
@@ -464,13 +512,8 @@ void wm_restore_window(Window* window) {
         window->movable = window->orig_movable;
         window->resizable = window->orig_resizable;
         
-        // Обновляем виджеты - возвращаем их на прежние позиции
-        Widget* widget = window->first_widget;
-        while (widget) {
-            // Виджеты остаются на своих относительных позициях
-            widget->needs_redraw = 1;
-            widget = widget->next;
-        }
+        // КРИТИЧНО: Обновляем все виджеты окна!
+        wg_update_all_widgets(window);
         
         if (window->on_restore) {
             window->on_restore(window);

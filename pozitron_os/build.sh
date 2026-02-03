@@ -27,7 +27,15 @@ gcc $CFLAGS -c src/drivers/mouse.c -o build/mouse.o
 gcc $CFLAGS -c src/drivers/timer.c -o build/timer.o
 gcc $CFLAGS -c src/drivers/pic.c -o build/pic.o
 gcc $CFLAGS -c src/drivers/ports.c -o build/ports.o
-gcc $CFLAGS -c src/drivers/cursor.c -o build/cursor.o  # НОВЫЙ ФАЙЛ!
+gcc $CFLAGS -c src/drivers/cursor.c -o build/cursor.o
+gcc $CFLAGS -c src/drivers/cmos.c -o build/cmos.o
+gcc $CFLAGS -c src/drivers/power.c -o build/power.o
+gcc $CFLAGS -c src/drivers/ata.c -o build/ata.o
+gcc $CFLAGS -c src/drivers/usb.c -o build/usb.o
+gcc $CFLAGS -c src/drivers/uhci.c -o build/uhci.o
+gcc $CFLAGS -c src/drivers/ehci.c -o build/ehci.o
+gcc $CFLAGS -c src/drivers/ohci.c -o build/ohci.o
+gcc $CFLAGS -c src/drivers/hid.c -o build/hid.o
 
 # Система
 gcc $CFLAGS -c src/core/event.c -o build/event.o
@@ -40,8 +48,9 @@ gcc $CFLAGS -c src/gui/core.c -o build/core.o
 gcc $CFLAGS -c src/gui/wm.c -o build/wm.o
 gcc $CFLAGS -c src/gui/wget.c -o build/wget.o
 gcc $CFLAGS -c src/gui/taskbar.c -o build/taskbar.o
+gcc $CFLAGS -c src/gui/shutdown.c -o build/shutdown.o
 
-gcc $CFLAGS -c src/drivers/cmos.c -o build/cmos.o
+gcc $CFLAGS -c src/hw/scanner.c -o build/scanner.o
 
 echo "Linking..."
 ld -m elf_i386 -T linker.ld -o build/kernel.bin \
@@ -70,6 +79,15 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/wget.o \
     build/taskbar.o \
     build/cmos.o \
+    build/scanner.o \
+    build/power.o \
+    build/shutdown.o \
+    build/ata.o \
+    build/usb.o \
+    build/uhci.o \
+    build/ehci.o \
+    build/ohci.o \
+    build/hid.o \
     -nostdlib
 
 echo "Creating ISO..."
@@ -79,4 +97,4 @@ cp grub/grub.cfg iso/boot/grub/
 grub-mkrescue -o pozitron.iso iso/
 
 echo "Build complete!"
-qemu-system-i386 -cdrom pozitron.iso -serial stdio
+qemu-system-i386 -cdrom pozitron.iso -serial stdio -usb -device usb-tablet

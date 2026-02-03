@@ -2,6 +2,7 @@
 #include "drivers/serial.h"
 #include "drivers/vesa.h"
 #include "kernel/memory.h"
+#include "gui/shutdown.h"
 
 struct GUI_State gui_state;
 
@@ -69,12 +70,82 @@ void gui_shutdown(void) {
     gui_state.initialized = 0;
 }
 
-// ============ ОБРАБОТКА СОБЫТИЙ (ОБНОВЛЕНА ДЛЯ НОВЫХ ВИДЖЕТОВ) ============
+// ============ ОБРАБОТКА СОБЫТИЙ ============
 void gui_handle_event(event_t* event) {
     if (!gui_state.initialized || !event) return;
+
+    // Получаем координаты мыши сразу
+    uint32_t mx = event->data1;
+    uint32_t my = event->data2 & 0xFFFF;
+    uint32_t button = (event->data2 >> 16) & 0xFF;
     
-    taskbar_handle_event(event);
+    // Проверяем режим выключения
+    if (is_shutdown_mode_active()) {
+        Window* shutdown_dialog = get_shutdown_dialog();
+        
+        if (shutdown_dialog && IS_VALID_WINDOW_PTR(shutdown_dialog)) {
+            uint8_t is_inside_dialog = point_in_rect_static(mx, my, 
+                                                           shutdown_dialog->x, shutdown_dialog->y,
+                                                           shutdown_dialog->width, shutdown_dialog->height);
+            
+            if (is_inside_dialog) {
+                uint32_t win_x = mx - shutdown_dialog->x;
+                uint32_t win_y = my - shutdown_dialog->y;
+                
+                Widget* widget = shutdown_dialog->first_widget;
+                while (widget) {
+                    uint32_t widget_rel_x = widget->x - shutdown_dialog->x;
+                    uint32_t widget_rel_y = widget->y - shutdown_dialog->y;
+                    
+                    uint8_t is_over_widget = (widget->visible && widget->enabled &&
+                                             point_in_rect_static(win_x, win_y, 
+                                                                widget_rel_x, widget_rel_y,
+                                                                widget->width, widget->height));
+                    
+                    if (event->type == EVENT_MOUSE_MOVE) {
+                        if (is_over_widget) {
+                            if (widget->state != STATE_HOVER && widget->state != STATE_PRESSED) {
+                                widget->state = STATE_HOVER;
+                                widget->needs_redraw = 1;
+                                shutdown_dialog->needs_redraw = 1;
+                            }
+                        } else {
+                            if (widget->state == STATE_HOVER) {
+                                widget->state = STATE_NORMAL;
+                                widget->needs_redraw = 1;
+                                shutdown_dialog->needs_redraw = 1;
+                            }
+                        }
+                    }
+                    else if (event->type == EVENT_MOUSE_CLICK && button == 0) {
+                        if (is_over_widget) {
+                            widget->state = STATE_PRESSED;
+                            widget->needs_redraw = 1;
+                            shutdown_dialog->needs_redraw = 1;
+                            
+                            if (widget->on_click) {
+                                widget->on_click(widget, widget->userdata);
+                            }
+                            return;
+                        }
+                    }
+                    else if (event->type == EVENT_MOUSE_RELEASE && button == 0) {
+                        if (widget->state == STATE_PRESSED) {
+                            widget->state = STATE_NORMAL;
+                            widget->needs_redraw = 1;
+                            shutdown_dialog->needs_redraw = 1;
+                        }
+                    }
+                    
+                    widget = widget->next;
+                }
+                return;
+            }
+        }
+        return;
+    }
     
+    // Обработка клавиатуры
     if (event->type == EVENT_KEY_PRESS) {
         switch (event->data1) {
             case 0x3B: // F1
@@ -104,8 +175,8 @@ void gui_handle_event(event_t* event) {
         }
         return;
     }
-    
-    // Обработка перетаскивания окон (если окно не максимизировано)
+
+    // Обработка перетаскивания окон
     if (gui_state.dragging_window) {
         Window* window = gui_state.dragging_window;
         
@@ -114,250 +185,288 @@ void gui_handle_event(event_t* event) {
             return;
         }
         
-        // Нельзя перетаскивать максимизированные окна
-        if (window->maximized) {
-            gui_state.dragging_window = NULL;
-            window->dragging = 0;
-            return;
-        }
-        
         if (event->type == EVENT_MOUSE_MOVE) {
-            uint32_t mx = event->data1;
-            uint32_t my = event->data2 & 0xFFFF;
+            // Нельзя перетаскивать максимизированные окна
+            if (window->maximized) {
+                gui_state.dragging_window = NULL;
+                return;
+            }
             
             uint32_t new_x = mx - window->drag_offset_x;
             uint32_t new_y = my - window->drag_offset_y;
             
+            // Ограничиваем перемещение в пределах экрана
             if (new_x > gui_state.screen_width - window->width) {
                 new_x = gui_state.screen_width - window->width;
             }
             if (new_y > gui_state.screen_height - TASKBAR_HEIGHT - window->height) {
                 new_y = gui_state.screen_height - TASKBAR_HEIGHT - window->height;
             }
+            if (new_x < 0) new_x = 0;
+            if (new_y < 0) new_y = 0;
             
+            // Перемещаем окно
             wm_move_window(window, new_x, new_y);
             window->needs_redraw = 1;
         }
-        else if (event->type == EVENT_MOUSE_RELEASE) {
+        else if (event->type == EVENT_MOUSE_RELEASE && button == 0) {
             gui_state.dragging_window = NULL;
         }
         
         return;
     }
+
+    // Обработка событий панели задач (только если клик в области панели)
+    if (my >= gui_state.screen_height - TASKBAR_HEIGHT) {
+        taskbar_handle_event(event);
+        return;
+    }
     
-        if (event->type == EVENT_MOUSE_CLICK) {
-        uint32_t mx = event->data1;
-        uint32_t my = event->data2 & 0xFFFF;
-        uint32_t button = (event->data2 >> 16) & 0xFF;
+    // Проверяем, открыто ли меню Пуск
+    Window* start_win = start_menu_get_window();
+    if (start_menu_is_visible() && start_win && IS_VALID_WINDOW_PTR(start_win)) {
+        // Проверяем, попал ли курсор в меню Пуск
+        uint8_t in_start_menu = point_in_rect_static(mx, my, start_win->x, start_win->y, 
+                                                   start_win->width, start_win->height);
         
-        if (button == 0) { // Левая кнопка мыши
-            if (my >= gui_state.screen_height - TASKBAR_HEIGHT) {
-                return; // Клик по панели задач обрабатывается в taskbar_handle_event
-            }
-            
-            Window* start_win = start_menu_get_window();
-            if (start_menu_is_visible() && start_win &&
-                IS_VALID_WINDOW_PTR(start_win) &&
-                point_in_rect_static(mx, my, start_win->x, start_win->y, 
-                             start_win->width, start_win->height)) {
-                return; // Клик по меню Пуск
-            }
-            
-            Window* window = wm_find_window_at(mx, my);
-            
-            if (window && IS_VALID_WINDOW_PTR(window)) {
-                wm_focus_window(window);
+        if (in_start_menu) {
+            if (event->type == EVENT_MOUSE_CLICK && button == 0) {
+                // Фокусируем окно меню Пуск
+                wm_focus_window(start_win);
                 
-                // Флаг для отслеживания кликов по виджетам
-                uint8_t widget_was_clicked = 0;
-                
-                // Проверяем клики по виджетам (В ПЕРВУЮ ОЧЕРЕДЬ!)
-                Widget* widget = window->first_widget;
+                // Обрабатываем клики по виджетам меню Пуск
+                Widget* widget = start_win->first_widget;
                 while (widget) {
                     if (widget->visible && widget->enabled &&
                         point_in_rect_static(mx, my, widget->x, widget->y, 
                                            widget->width, widget->height)) {
                         
-                        widget_was_clicked = 1;
                         widget->state = STATE_PRESSED;
                         widget->needs_redraw = 1;
-                        window->needs_redraw = 1;
-                        
-                        // Специальная обработка для разных типов виджетов
-                        if (widget->type == WIDGET_CHECKBOX) {
-                            // Переключаем состояние чекбокса
-                            if (widget->data) {
-                                uint8_t* checked = (uint8_t*)widget->data;
-                                *checked = !(*checked);
-                            }
-                        }
-                        else if (widget->type == WIDGET_SLIDER) {
-                            // КРИТИЧНО: Останавливаем перетаскивание окна
-                            if (gui_state.dragging_window == window) {
-                                gui_state.dragging_window = NULL;
-                                window->dragging = 0;
-                            }
-                            
-                            // Запоминаем что тащим слайдер
-                            widget->dragging = 1;
-                            
-                            // Сразу обновляем значение по клику
-                            if (widget->data) {
-                                uint32_t* data = (uint32_t*)widget->data;
-                                uint32_t min = data[0];
-                                uint32_t max = data[1];
-                                
-                                if (max > min) {
-                                    uint32_t relative_x = mx - widget->x;
-                                    uint32_t value = min + (relative_x * (max - min)) / widget->width;
-                                    if (value < min) value = min;
-                                    if (value > max) value = max;
-                                    data[2] = value;
-                                }
-                            }
-                        }
+                        start_win->needs_redraw = 1;
                         
                         if (widget->on_click) {
                             widget->on_click(widget, widget->userdata);
                         }
-                        
-                        break;
+                        return; // Событие обработано
                     }
                     widget = widget->next;
                 }
+            }
+            else if (event->type == EVENT_MOUSE_MOVE) {
+                // Фокусируем окно меню Пуск при наведении
+                wm_focus_window(start_win);
                 
-                // ТОЛЬКО если не кликнули по виджету, проверяем заголовок окна
-                if (!widget_was_clicked && window->has_titlebar) {
-                    uint32_t title_y = window->y;
-                    uint32_t title_h = window->title_height;
-                    
-                    // Проверяем, попал ли клик в заголовок
-                    if (my >= title_y && my < title_y + title_h) {
-                        // Кнопка закрытия
-                        if (window->closable) {
-                            uint32_t close_x;
-                            if (window->maximized) {
-                                close_x = gui_state.screen_width - 25;
-                            } else {
-                                close_x = window->x + window->width - 25;
-                            }
-                            uint32_t close_y = window->y + 5;
-                            
-                            if (mx >= close_x && mx < close_x + 15 &&
-                                my >= close_y && my < close_y + 15) {
-                                wm_close_window(window);
-                                return;
-                            }
-                        }
+                // Обработка hover для виджетов меню Пуск
+                Widget* widget = start_win->first_widget;
+                while (widget) {
+                    if (widget->visible && widget->enabled) {
+                        uint8_t is_hovering = point_in_rect_static(mx, my, 
+                                                                  widget->x, widget->y,
+                                                                  widget->width, widget->height);
                         
-                        // Кнопка сворачивания
-                        if (window->minimizable) {
-                            uint32_t min_x;
-                            if (window->maximized) {
-                                min_x = gui_state.screen_width - (window->closable ? 45 : 25);
-                            } else {
-                                min_x = window->x + window->width - (window->closable ? 45 : 25);
+                        if (is_hovering) {
+                            if (widget->state != STATE_HOVER) {
+                                widget->state = STATE_HOVER;
+                                widget->needs_redraw = 1;
+                                start_win->needs_redraw = 1;
                             }
-                            uint32_t min_y = window->y + 5;
-                            
-                            if (mx >= min_x && mx < min_x + 15 &&
-                                my >= min_y && my < min_y + 15) {
-                                wm_minimize_window(window);
-                                return;
+                        } else {
+                            if (widget->state == STATE_HOVER) {
+                                widget->state = STATE_NORMAL;
+                                widget->needs_redraw = 1;
+                                start_win->needs_redraw = 1;
                             }
-                        }
-                        
-                        // Кнопка максимизации/восстановления
-                        if (window->maximizable) {
-                            uint32_t max_x;
-                            if (window->maximized) {
-                                max_x = gui_state.screen_width - (window->closable ? 65 : 45);
-                            } else {
-                                max_x = window->x + window->width - (window->closable ? 65 : 45);
-                            }
-                            uint32_t max_y = window->y + 5;
-                            
-                            if (mx >= max_x && mx < max_x + 15 &&
-                                my >= max_y && my < max_y + 15) {
-                                if (window->maximized) {
-                                    wm_restore_window(window);
-                                } else {
-                                    wm_maximize_window(window);
-                                }
-                                return;
-                            }
-                        }
-                        
-                        // Начало перетаскивания (только если окно не максимизировано и не кликнули по виджету)
-                        if (window->movable && !window->minimized && !window->maximized) {
-                            window->dragging = 1;
-                            window->drag_offset_x = mx - window->x;
-                            window->drag_offset_y = my - window->y;
-                            gui_state.dragging_window = window;
                         }
                     }
+                    widget = widget->next;
                 }
-            } else {
-                // Клик вне окон - снимаем фокус
-                if (gui_state.focused_window && 
-                    IS_VALID_WINDOW_PTR(gui_state.focused_window)) {
-                    gui_state.focused_window->focused = 0;
-                    gui_state.focused_window->needs_redraw = 1;
+                return;
+            }
+            else if (event->type == EVENT_MOUSE_RELEASE && button == 0) {
+                // Сбрасываем состояние нажатых кнопок в меню Пуск
+                Widget* widget = start_win->first_widget;
+                while (widget) {
+                    if (widget->state == STATE_PRESSED) {
+                        if (point_in_rect_static(mx, my, widget->x, widget->y,
+                                                widget->width, widget->height)) {
+                            widget->state = STATE_HOVER;
+                        } else {
+                            widget->state = STATE_NORMAL;
+                        }
+                        widget->needs_redraw = 1;
+                        start_win->needs_redraw = 1;
+                    }
+                    widget = widget->next;
                 }
-                gui_state.focused_window = NULL;
+                return;
             }
         }
+        // Если курсор вне меню Пуск - обрабатываем как обычные события
     }
-    else if (event->type == EVENT_MOUSE_MOVE) {
-        uint32_t mx = event->data1;
-        uint32_t my = event->data2 & 0xFFFF;
+
+    // Обработка кликов мыши по обычным окнам
+    if (event->type == EVENT_MOUSE_CLICK && button == 0) {
+        Window* window = wm_find_window_at(mx, my);
         
-        // Если тащим слайдер
-        if (gui_state.dragging_window && IS_VALID_WINDOW_PTR(gui_state.dragging_window)) {
-            Window* drag_window = gui_state.dragging_window;
-            Widget* dragged_widget = NULL;
+        if (window && IS_VALID_WINDOW_PTR(window)) {
+            wm_focus_window(window);
             
-            // Ищем виджет который тащим
-            Widget* widget = drag_window->first_widget;
+            // Проверяем клики по виджетам
+            uint8_t widget_was_clicked = 0;
+            Widget* widget = window->first_widget;
+            
             while (widget) {
-                if (widget->dragging && widget->type == WIDGET_SLIDER) {
-                    dragged_widget = widget;
+                if (widget->visible && widget->enabled &&
+                    point_in_rect_static(mx, my, widget->x, widget->y, 
+                                       widget->width, widget->height)) {
+                    
+                    widget_was_clicked = 1;
+                    widget->state = STATE_PRESSED;
+                    widget->needs_redraw = 1;
+                    window->needs_redraw = 1;
+                    
+                    // Специальная обработка виджетов
+                    if (widget->type == WIDGET_CHECKBOX && widget->data) {
+                        uint8_t* checked = (uint8_t*)widget->data;
+                        *checked = !(*checked);
+                    }
+                    else if (widget->type == WIDGET_SLIDER && widget->data) {
+                        // Начинаем перетаскивание слайдера
+                        widget->dragging = 1;
+                        
+                        uint32_t* data = (uint32_t*)widget->data;
+                        uint32_t min = data[0];
+                        uint32_t max = data[1];
+                        
+                        if (max > min) {
+                            uint32_t relative_x = mx - widget->x;
+                            uint32_t value = min + (relative_x * (max - min)) / widget->width;
+                            if (value < min) value = min;
+                            if (value > max) value = max;
+                            data[2] = value;
+                        }
+                    }
+                    
+                    if (widget->on_click) {
+                        widget->on_click(widget, widget->userdata);
+                    }
+                    
                     break;
                 }
                 widget = widget->next;
             }
             
-            if (dragged_widget && dragged_widget->data) {
-                uint32_t* data = (uint32_t*)dragged_widget->data;
-                uint32_t min = data[0];
-                uint32_t max = data[1];
+            // Если не кликнули по виджету, проверяем заголовок окна
+            if (!widget_was_clicked && window->has_titlebar) {
+                uint32_t title_y = window->y;
+                uint32_t title_h = window->title_height;
                 
-                // Вычисляем новое значение
-                int32_t relative_x = mx - dragged_widget->x;
-                if (relative_x < 0) relative_x = 0;
-                if (relative_x > (int32_t)dragged_widget->width) relative_x = dragged_widget->width;
-                
-                uint32_t value = min + (relative_x * (max - min)) / dragged_widget->width;
-                if (value < min) value = min;
-                if (value > max) value = max;
-                
-                data[2] = value;
-                dragged_widget->needs_redraw = 1;
-                drag_window->needs_redraw = 1;
-                
-                if (dragged_widget->on_click) {
-                    dragged_widget->on_click(dragged_widget, dragged_widget->userdata);
+                // Проверяем, попал ли клик в заголовок
+                if (my >= title_y && my < title_y + title_h) {
+                    // Кнопка закрытия
+                    if (window->closable) {
+                        uint32_t close_x = window->maximized ? 
+                                          gui_state.screen_width - 25 : 
+                                          window->x + window->width - 25;
+                        uint32_t close_y = window->y + 5;
+                        
+                        if (mx >= close_x && mx < close_x + 15 &&
+                            my >= close_y && my < close_y + 15) {
+                            wm_close_window(window);
+                            return;
+                        }
+                    }
+                    
+                    // Кнопка сворачивания
+                    if (window->minimizable) {
+                        uint32_t min_x = window->maximized ? 
+                                        gui_state.screen_width - (window->closable ? 45 : 25) : 
+                                        window->x + window->width - (window->closable ? 45 : 25);
+                        uint32_t min_y = window->y + 5;
+                        
+                        if (mx >= min_x && mx < min_x + 15 &&
+                            my >= min_y && my < min_y + 15) {
+                            wm_minimize_window(window);
+                            return;
+                        }
+                    }
+                    
+                    // Кнопка максимизации
+                    if (window->maximizable) {
+                        uint32_t max_x = window->maximized ? 
+                                        gui_state.screen_width - (window->closable ? 65 : 45) : 
+                                        window->x + window->width - (window->closable ? 65 : 45);
+                        uint32_t max_y = window->y + 5;
+                        
+                        if (mx >= max_x && mx < max_x + 15 &&
+                            my >= max_y && my < max_y + 15) {
+                            if (window->maximized) {
+                                wm_restore_window(window);
+                            } else {
+                                wm_maximize_window(window);
+                            }
+                            return;
+                        }
+                    }
+                    
+                    // Начало перетаскивания окна
+                    if (window->movable && !window->minimized && !window->maximized) {
+                        window->drag_offset_x = mx - window->x;
+                        window->drag_offset_y = my - window->y;
+                        gui_state.dragging_window = window;
+                        window->needs_redraw = 1;
+                    }
                 }
-                
-                return;
             }
+        } else {
+            // Клик вне окон - снимаем фокус
+            if (gui_state.focused_window && 
+                IS_VALID_WINDOW_PTR(gui_state.focused_window)) {
+                gui_state.focused_window->focused = 0;
+                gui_state.focused_window->needs_redraw = 1;
+            }
+            gui_state.focused_window = NULL;
         }
-        
-        if (my >= gui_state.screen_height - TASKBAR_HEIGHT) {
-            return;
-        }
-        
+    }
+    // Обработка движения мыши
+    else if (event->type == EVENT_MOUSE_MOVE) {
+        // Проверяем перетаскивание слайдера
         Window* window = gui_state.first_window;
+        while (window) {
+            if (IS_VALID_WINDOW_PTR(window)) {
+                Widget* widget = window->first_widget;
+                while (widget) {
+                    if (widget->dragging && widget->type == WIDGET_SLIDER && widget->data) {
+                        uint32_t* data = (uint32_t*)widget->data;
+                        uint32_t min = data[0];
+                        uint32_t max = data[1];
+                        
+                        int32_t relative_x = mx - widget->x;
+                        if (relative_x < 0) relative_x = 0;
+                        if (relative_x > (int32_t)widget->width) relative_x = widget->width;
+                        
+                        uint32_t value = min + (relative_x * (max - min)) / widget->width;
+                        if (value < min) value = min;
+                        if (value > max) value = max;
+                        
+                        data[2] = value;
+                        widget->needs_redraw = 1;
+                        window->needs_redraw = 1;
+                        
+                        if (widget->on_click) {
+                            widget->on_click(widget, widget->userdata);
+                        }
+                        return;
+                    }
+                    widget = widget->next;
+                }
+            }
+            window = window->next;
+        }
+        
+        // Обработка hover для обычных окон
+        window = gui_state.first_window;
         while (window) {
             if (IS_VALID_WINDOW_PTR(window) && 
                 window->visible && !window->minimized && 
@@ -392,60 +501,131 @@ void gui_handle_event(event_t* event) {
             window = window->next;
         }
     }
-    else if (event->type == EVENT_MOUSE_RELEASE) {
-        uint32_t mx = event->data1;
-        uint32_t my = event->data2 & 0xFFFF;
-        uint32_t button = (event->data2 >> 16) & 0xFF;
+    // Обработка отпускания кнопки мыши
+    else if (event->type == EVENT_MOUSE_RELEASE && button == 0) {
+        // Сбрасываем dragging у всех виджетов
+        Window* window = gui_state.first_window;
+        while (window) {
+            if (IS_VALID_WINDOW_PTR(window)) {
+                Widget* widget = window->first_widget;
+                while (widget) {
+                    if (widget->dragging) {
+                        widget->dragging = 0;
+                        widget->state = STATE_NORMAL;
+                        widget->needs_redraw = 1;
+                        window->needs_redraw = 1;
+                    }
+                    widget = widget->next;
+                }
+            }
+            window = window->next;
+        }
         
-        if (button == 0) {
-            // Сбрасываем dragging у всех виджетов
-            Window* window = gui_state.first_window;
-            while (window) {
-                if (IS_VALID_WINDOW_PTR(window)) {
-                    Widget* widget = window->first_widget;
-                    while (widget) {
-                        if (widget->dragging) {
-                            widget->dragging = 0;
+        // Сбрасываем состояние нажатых виджетов во всех окнах
+        window = gui_state.first_window;
+        while (window) {
+            if (IS_VALID_WINDOW_PTR(window)) {
+                Widget* widget = window->first_widget;
+                while (widget) {
+                    if (widget->state == STATE_PRESSED) {
+                        if (point_in_rect_static(mx, my, widget->x, widget->y,
+                                                widget->width, widget->height)) {
+                            widget->state = STATE_HOVER;
+                        } else {
                             widget->state = STATE_NORMAL;
-                            widget->needs_redraw = 1;
-                            window->needs_redraw = 1;
                         }
-                        widget = widget->next;
+                        widget->needs_redraw = 1;
+                        window->needs_redraw = 1;
                     }
+                    widget = widget->next;
                 }
-                window = window->next;
             }
-            
-            gui_state.dragging_window = NULL;
-            
-            // Сбрасываем состояние нажатых виджетов
-            window = gui_state.first_window;
-            while (window) {
-                if (IS_VALID_WINDOW_PTR(window)) {
-                    Widget* widget = window->first_widget;
-                    while (widget) {
-                        if (widget->state == STATE_PRESSED) {
-                            if (point_in_rect_static(mx, my, widget->x, widget->y,
-                                                    widget->width, widget->height)) {
-                                widget->state = STATE_HOVER;
-                            } else {
-                                widget->state = STATE_NORMAL;
-                            }
-                            widget->needs_redraw = 1;
-                            window->needs_redraw = 1;
-                        }
-                        widget = widget->next;
-                    }
-                }
-                window = window->next;
-            }
+            window = window->next;
         }
     }
 }
 
-// ============ РЕНДЕРИНГ (ОБНОВЛЕН ДЛЯ НОВЫХ ВИДЖЕТОВ) ============
+// ============ РЕНДЕРИНГ ============
 void gui_render(void) {
     if (!gui_state.initialized) return;
+
+    // Если режим выключения активен
+    if (is_shutdown_mode_active()) {
+        render_darken_effect();
+        
+        Window* dialog = get_shutdown_dialog();
+        if (dialog && IS_VALID_WINDOW_PTR(dialog) && dialog->visible) {
+            vesa_draw_rect(dialog->x, dialog->y, dialog->width, dialog->height, WINDOW_BG_COLOR);
+            
+            if (dialog->has_titlebar) {
+                vesa_draw_rect(dialog->x, dialog->y, dialog->width, 
+                             dialog->title_height, WINDOW_TITLE_ACTIVE);
+                
+                if (dialog->title) {
+                    uint32_t text_x = dialog->x + 8;
+                    uint32_t text_y = dialog->y + (dialog->title_height - 16) / 2;
+                    vesa_draw_text(text_x, text_y, dialog->title, 
+                                 0xFFFFFF, WINDOW_TITLE_ACTIVE);
+                }
+            }
+            
+            // Рамка
+            vesa_draw_rect(dialog->x, dialog->y, dialog->width, 1, WINDOW_BORDER_COLOR);
+            vesa_draw_rect(dialog->x, dialog->y + dialog->height - 1, 
+                         dialog->width, 1, WINDOW_BORDER_COLOR);
+            vesa_draw_rect(dialog->x, dialog->y, 1, dialog->height, WINDOW_BORDER_COLOR);
+            vesa_draw_rect(dialog->x + dialog->width - 1, dialog->y, 
+                         1, dialog->height, WINDOW_BORDER_COLOR);
+            
+            Widget* widget = dialog->first_widget;
+            while (widget) {
+                if (!widget->visible) {
+                    widget = widget->next;
+                    continue;
+                }
+                
+                if (widget->type == WIDGET_BUTTON) {
+                    uint32_t btn_color;
+                    switch (widget->state) {
+                        case STATE_HOVER: btn_color = WINDOW_BUTTON_HOVER; break;
+                        case STATE_PRESSED: btn_color = WINDOW_BUTTON_PRESSED; break;
+                        default: btn_color = WINDOW_BUTTON_COLOR; break;
+                    }
+                    
+                    vesa_draw_rect(widget->x, widget->y, widget->width, widget->height, btn_color);
+                    vesa_draw_rect(widget->x, widget->y, widget->width, 1, WINDOW_BORDER_COLOR);
+                    vesa_draw_rect(widget->x, widget->y + widget->height - 1, 
+                                 widget->width, 1, WINDOW_BORDER_COLOR);
+                    vesa_draw_rect(widget->x, widget->y, 1, widget->height, WINDOW_BORDER_COLOR);
+                    vesa_draw_rect(widget->x + widget->width - 1, widget->y, 
+                                 1, widget->height, WINDOW_BORDER_COLOR);
+                    
+                    if (widget->text) {
+                        uint32_t text_len = gui_strlen(widget->text);
+                        uint32_t text_x = widget->x + (widget->width - text_len * 8) / 2;
+                        uint32_t text_y = widget->y + (widget->height - 16) / 2;
+                        
+                        if (text_x < widget->x + 4) text_x = widget->x + 4;
+                        if (text_y < widget->y + 2) text_y = widget->y + 2;
+                        
+                        vesa_draw_text(text_x, text_y, widget->text, 0x000000, btn_color);
+                    }
+                }
+                else if (widget->type == WIDGET_LABEL) {
+                    if (widget->text) {
+                        vesa_draw_text(widget->x, widget->y, widget->text, 0x000000, WINDOW_BG_COLOR);
+                    }
+                }
+                
+                widget = widget->next;
+            }
+            
+            vesa_mark_dirty(dialog->x - 5, dialog->y - 5,
+                           dialog->width + 10, dialog->height + 10);
+        }
+        
+        return;
+    }
     
     // Проверяем, есть ли видимые окна
     uint8_t has_visible_windows = 0;
@@ -523,13 +703,11 @@ void gui_render(void) {
                     
                     vesa_draw_rect(max_x, button_y, 15, 15, WINDOW_BUTTON_COLOR);
                     
-                    // Рисуем рамку черного квадрата (контур)
                     vesa_draw_rect(max_x + 3, button_y + 3, 9, 1, 0x000000);
                     vesa_draw_rect(max_x + 3, button_y + 11, 9, 1, 0x000000);
                     vesa_draw_rect(max_x + 3, button_y + 3, 1, 9, 0x000000);
                     vesa_draw_rect(max_x + 11, button_y + 3, 1, 9, 0x000000);
                     
-                    // Рамка кнопки
                     vesa_draw_rect(max_x, button_y, 15, 1, WINDOW_BORDER_COLOR);
                     vesa_draw_rect(max_x, button_y + 14, 15, 1, WINDOW_BORDER_COLOR);
                     vesa_draw_rect(max_x, button_y, 1, 15, WINDOW_BORDER_COLOR);
@@ -627,24 +805,20 @@ void gui_render(void) {
                     }
                 }
                 else if (widget->type == WIDGET_CHECKBOX) {
-                    // Фон чекбокса
                     uint32_t box_x = widget->x;
                     uint32_t box_y = widget->y + 2;
                     uint32_t box_size = 14;
                     
-                    // Рамка
                     vesa_draw_rect(box_x, box_y, box_size, box_size, CHECKBOX_COLOR);
                     vesa_draw_rect(box_x, box_y, box_size, 1, WINDOW_BORDER_COLOR);
                     vesa_draw_rect(box_x, box_y + box_size - 1, box_size, 1, WINDOW_BORDER_COLOR);
                     vesa_draw_rect(box_x, box_y, 1, box_size, WINDOW_BORDER_COLOR);
                     vesa_draw_rect(box_x + box_size - 1, box_y, 1, box_size, WINDOW_BORDER_COLOR);
                     
-                    // Галочка если checked
                     if (widget->data && *((uint8_t*)widget->data)) {
                         vesa_draw_rect(box_x + 3, box_y + 3, 8, 8, CHECKBOX_CHECKED_COLOR);
                     }
                     
-                    // Текст
                     if (widget->text) {
                         vesa_draw_text(widget->x + 20, widget->y, widget->text, 0x000000, WINDOW_BG_COLOR);
                     }
@@ -660,7 +834,6 @@ void gui_render(void) {
                     uint32_t max = data[1];
                     uint32_t value = data[2];
                     
-                    // Трек слайдера
                     uint32_t track_height = 6;
                     uint32_t track_y = widget->y + (widget->height - track_height) / 2;
                     
@@ -668,7 +841,6 @@ void gui_render(void) {
                     vesa_draw_rect(widget->x, track_y, widget->width, 1, 0x606060);
                     vesa_draw_rect(widget->x, track_y + track_height - 1, widget->width, 1, 0xA0A0A0);
                     
-                    // Заполненная часть
                     if (max > min) {
                         uint32_t fill_width = (value - min) * widget->width / (max - min);
                         if (fill_width > 0) {
@@ -676,7 +848,6 @@ void gui_render(void) {
                         }
                     }
                     
-                    // Ползунок
                     uint32_t handle_size = 16;
                     uint32_t handle_x = widget->x;
                     if (max > min) {
@@ -696,20 +867,17 @@ void gui_render(void) {
                         value = *((uint32_t*)widget->data);
                     }
                     
-                    // Фон прогресс-бара
                     vesa_draw_rect(widget->x, widget->y, widget->width, widget->height, PROGRESSBAR_BG_COLOR);
                     vesa_draw_rect(widget->x, widget->y, widget->width, 1, 0x808080);
                     vesa_draw_rect(widget->x, widget->y + widget->height - 1, widget->width, 1, 0x808080);
                     vesa_draw_rect(widget->x, widget->y, 1, widget->height, 0x808080);
                     vesa_draw_rect(widget->x + widget->width - 1, widget->y, 1, widget->height, 0x808080);
                     
-                    // Заполненная часть
                     uint32_t fill_width = (value * (widget->width - 2)) / 100;
                     if (fill_width > 0) {
                         vesa_draw_rect(widget->x + 1, widget->y + 1, fill_width, widget->height - 2, PROGRESSBAR_FILL_COLOR);
                     }
                     
-                    // Процент текстом
                     if (widget->height >= 16) {
                         char percent[8];
                         percent[0] = '0' + (value / 100);
@@ -727,7 +895,6 @@ void gui_render(void) {
                 widget = widget->next;
             }
             
-            // Помечаем область окна как dirty для обновления
             vesa_mark_dirty(window->x - 5, window->y - 5,
                            window->width + 10, window->height + 10);
         }

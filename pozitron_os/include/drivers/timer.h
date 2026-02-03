@@ -2,7 +2,7 @@
 #define TIMER_H
 
 #include "../kernel/types.h"
-#include "../core/isr.h"  // Добавляем для registers_t
+#include "../core/isr.h"
 
 #define TIMER_FREQUENCY 100
 
@@ -17,5 +17,8 @@ void timer_init(uint32_t frequency);
 void timer_wait(uint32_t ticks);
 uint32_t timer_get_ticks(void);
 void timer_handler(registers_t* regs);
+
+// Добавляем новую функцию
+void timer_sleep_ms(uint32_t milliseconds);
 
 #endif

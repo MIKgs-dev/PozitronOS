@@ -59,3 +59,12 @@ void timer_wait(uint32_t ticks) {
         asm volatile ("hlt");
     }
 }
+
+// Задержка в миллисекундах
+void timer_sleep_ms(uint32_t milliseconds) {
+    // 100Hz таймер = 10ms на тик
+    uint32_t ticks_to_wait = milliseconds / 10;
+    if (ticks_to_wait == 0) ticks_to_wait = 1;
+    
+    timer_wait(ticks_to_wait);
+}

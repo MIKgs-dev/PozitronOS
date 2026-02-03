@@ -15,9 +15,9 @@ typedef enum {
     WIDGET_INPUT,
     WIDGET_CHECKBOX,
     WIDGET_SLIDER,
-    WIDGET_PROGRESSBAR,  // НОВОЕ
-    WIDGET_COMBOBOX,     // НОВОЕ
-    WIDGET_RADIO,        // НОВОЕ
+    WIDGET_PROGRESSBAR,
+    WIDGET_COMBOBOX,
+    WIDGET_RADIO,
     WIDGET_WINDOW,
     WIDGET_CONTAINER
 } WidgetType;
@@ -34,7 +34,9 @@ typedef enum {
 struct Widget {
     uint32_t id;
     WidgetType type;
-    uint32_t x, y, width, height;
+    uint32_t x, y, width, height;        // Абсолютные координаты
+    float rel_x, rel_y;                  // Относительные координаты (0.0 - 1.0)
+    float rel_width, rel_height;         // Относительные размеры
     uint8_t visible;
     uint8_t enabled;
     Window* parent_window;
@@ -57,6 +59,7 @@ struct Widget {
     uint8_t drag_enabled : 1;
     uint8_t resize_enabled : 1;
     uint8_t dragging : 1;
+    uint8_t use_relative : 1;            // Использует относительные координаты
 };
 
 // ============ ОКНО ============
@@ -87,6 +90,7 @@ struct Window {
     void (*on_minimize)(Window*);
     void (*on_maximize)(Window*);
     void (*on_restore)(Window*);
+    void (*on_resize)(Window*);          // Callback при изменении размера
     uint8_t closable : 1;
     uint8_t movable : 1;
     uint8_t resizable : 1;
@@ -94,6 +98,7 @@ struct Window {
     uint8_t maximizable : 1;
     uint8_t needs_redraw : 1;
     uint8_t in_taskbar : 1;
+    uint8_t is_resizing : 1;
 };
 
 // ============ ПАНЕЛЬ ЗАДАЧ ============
@@ -183,7 +188,10 @@ void wm_close_window(Window* window);
 void wm_minimize_window(Window* window);
 void wm_maximize_window(Window* window);
 void wm_restore_window(Window* window);
+void wm_resize_window(Window* window, uint32_t width, uint32_t height); // НОВОЕ
 void wm_dump_info(void);
+
+void shutdown_dialog_callback(Widget* button, void* userdata);
 
 #define WINDOW_CLOSABLE    0x01
 #define WINDOW_MOVABLE     0x02
@@ -193,6 +201,7 @@ void wm_dump_info(void);
 #define WINDOW_MAXIMIZABLE 0x20
 
 // ============ WIDGETS API ============
+// Старые функции (абсолютные координаты) - для обратной совместимости
 Widget* wg_create_button(Window* parent, const char* text, 
                         uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 Widget* wg_create_button_ex(Window* parent, const char* text, 
@@ -201,15 +210,38 @@ Widget* wg_create_button_ex(Window* parent, const char* text,
 Widget* wg_create_label(Window* parent, const char* text, 
                        uint32_t x, uint32_t y);
 Widget* wg_create_checkbox(Window* parent, const char* text, 
-                          uint32_t x, uint32_t y, uint8_t checked);  // НОВОЕ
+                          uint32_t x, uint32_t y, uint8_t checked);
 Widget* wg_create_slider(Window* parent, uint32_t x, uint32_t y, 
-                        uint32_t width, uint32_t min, uint32_t max, uint32_t value);  // НОВОЕ
+                        uint32_t width, uint32_t min, uint32_t max, uint32_t value);
 Widget* wg_create_progressbar(Window* parent, uint32_t x, uint32_t y, 
-                             uint32_t width, uint32_t height, uint32_t value);  // НОВОЕ
+                             uint32_t width, uint32_t height, uint32_t value);
+
+// НОВЫЕ функции с относительными координатами
+Widget* wg_create_button_rel(Window* parent, const char* text,
+                            float rel_x, float rel_y, 
+                            float rel_width, float rel_height,
+                            void (*callback)(Widget*, void*), void* userdata);
+Widget* wg_create_label_rel(Window* parent, const char* text,
+                           float rel_x, float rel_y);
+Widget* wg_create_checkbox_rel(Window* parent, const char* text,
+                              float rel_x, float rel_y, uint8_t checked);
+Widget* wg_create_slider_rel(Window* parent, float rel_x, float rel_y,
+                            float rel_width, float rel_height,
+                            uint32_t min, uint32_t max, uint32_t value);
+Widget* wg_create_progressbar_rel(Window* parent, float rel_x, float rel_y,
+                                 float rel_width, float rel_height, uint32_t value);
 
 void wg_destroy_widget(Widget* widget);
 void wg_set_text(Widget* widget, const char* text);
 void wg_set_callback_ex(Widget* widget, void (*callback)(Widget*, void*), void* userdata);
+
+// Функции для работы с координатами
+void wg_update_position(Widget* widget);                       // Обновить абсолютные координаты
+void wg_set_relative_position(Widget* widget, float rel_x, float rel_y,
+                             float rel_width, float rel_height); // Установить относительные
+void wg_set_absolute_position(Widget* widget, uint32_t x, uint32_t y,
+                             uint32_t width, uint32_t height);   // Установить абсолютные
+void wg_update_all_widgets(Window* window);                     // Обновить все виджеты окна
 
 // Функции для работы с новыми виджетами
 uint8_t wg_get_checkbox_state(Widget* checkbox);
@@ -257,5 +289,7 @@ extern struct GUI_State {
     uint8_t debug_mode;
     Window* window_registry[WINDOW_REGISTRY_SIZE];
 } gui_state;
+
+#include "shutdown.h"
 
 #endif

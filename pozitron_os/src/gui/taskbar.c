@@ -572,7 +572,11 @@ static void create_window_from_start_menu(Widget* button, void* userdata) {
     char* dst = title_buffer;
     size_t i = 0;
     
-    while (src[i] && i < 62) dst[i] = src[i++];
+    i = 0;
+    while (src[i] && i < 62) {
+        dst[i] = src[i];
+        i++;
+    }
     dst[i] = '\0';
     
     static uint8_t offset = 0;
@@ -628,33 +632,19 @@ void start_menu_create(void) {
     vesa_draw_rect(start_menu_window->x + 5, start_menu_window->y + 55, 
                   240, 1, 0x808080);
     
-    wg_create_button_ex(start_menu_window, "Calculator", 
-                      10, 60, 230, 25,
-                      create_window_from_start_menu, "Calculator");
-    
-    wg_create_button_ex(start_menu_window, "Text Editor", 
-                      10, 90, 230, 25,
-                      create_window_from_start_menu, "Text Editor");
-    
-    wg_create_button_ex(start_menu_window, "Terminal", 
-                      10, 120, 230, 25,
-                      create_window_from_start_menu, "Terminal");
-    
-    wg_create_button_ex(start_menu_window, "Settings", 
-                      10, 150, 230, 25,
-                      create_window_from_start_menu, "Settings");
-    
-    wg_create_button_ex(start_menu_window, "File Explorer", 
-                      10, 180, 230, 25,
-                      create_window_from_start_menu, "File Explorer");
+    wg_create_button_rel(start_menu_window, "Calculator",
+                    0.04f, 0.24f,   // x = 4%, y = 24% (примерно 10,60 при 250x250)
+                    0.92f, 0.1f,    // width = 92%, height = 10% (230x25)
+                    create_window_from_start_menu, "Calculator");
+
+    Widget* shutdown_btn = wg_create_button_ex(start_menu_window, 
+    "Shutdown Computer", 
+    10, 180, 230, 25,
+    shutdown_dialog_callback,
+    NULL);
     
     vesa_draw_rect(start_menu_window->x + 5, start_menu_window->y + 210, 
                   240, 1, 0x808080);
-    
-    Widget* btn_close = wg_create_button(start_menu_window, "Close Menu", 10, 220, 230, 25);
-    if (btn_close) {
-        wg_set_callback_ex(btn_close, (void (*)(Widget*, void*))start_menu_close, NULL);
-    }
     
     wm_focus_window(start_menu_window);
 }
