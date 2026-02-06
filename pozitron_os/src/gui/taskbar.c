@@ -111,62 +111,67 @@ static uint32_t calculate_visible_button_count(void) {
 static void update_time_from_rtc(void) {
     static uint32_t last_rtc_check = 0;
     static uint8_t initialized = 0;
+    static uint8_t last_second = 255; // Значение, которое заведомо не совпадет
     
     uint32_t current_ticks = timer_get_ticks();
     
-    // Для таскбара обновляем каждую секунду
-    if (!initialized || (current_ticks - last_rtc_check) >= 100) {
+    // === ИСПРАВЛЕННАЯ ВЕРСИЯ ===
+    // Обновляем каждые 50 тиков (0.5 секунды) или при изменении секунды
+    if (!initialized || (current_ticks - last_rtc_check) >= 50) {
         rtc_datetime_t datetime;
         
         cmos_read_datetime(&datetime);
         
-        // 1. Для таскбара: HH:MM (5 символов)
-        clock_text[0] = '0' + (datetime.hours / 10);
-        clock_text[1] = '0' + (datetime.hours % 10);
-        clock_text[2] = ':';
-        clock_text[3] = '0' + (datetime.minutes / 10);
-        clock_text[4] = '0' + (datetime.minutes % 10);
-        clock_text[5] = '\0';
-        
-        // 2. Для окна времени: HH:MM:SS (8 символов)
-        clock_text_full[0] = '0' + (datetime.hours / 10);
-        clock_text_full[1] = '0' + (datetime.hours % 10);
-        clock_text_full[2] = ':';
-        clock_text_full[3] = '0' + (datetime.minutes / 10);
-        clock_text_full[4] = '0' + (datetime.minutes % 10);
-        clock_text_full[5] = ':';
-        clock_text_full[6] = '0' + (datetime.seconds / 10);
-        clock_text_full[7] = '0' + (datetime.seconds % 10);
-        clock_text_full[8] = '\0';
-        
-        format_date_string_full(datetime.day, datetime.month, datetime.year, date_text);
+        // 1. Обновляем только если изменилась секунда
+        if (datetime.seconds != last_second || !initialized) {
+            last_second = datetime.seconds;
+            
+            // Для таскбара: HH:MM (5 символов)
+            clock_text[0] = '0' + (datetime.hours / 10);
+            clock_text[1] = '0' + (datetime.hours % 10);
+            clock_text[2] = ':';
+            clock_text[3] = '0' + (datetime.minutes / 10);
+            clock_text[4] = '0' + (datetime.minutes % 10);
+            clock_text[5] = '\0';
+            
+            // Для окна времени: HH:MM:SS (8 символов)
+            clock_text_full[0] = '0' + (datetime.hours / 10);
+            clock_text_full[1] = '0' + (datetime.hours % 10);
+            clock_text_full[2] = ':';
+            clock_text_full[3] = '0' + (datetime.minutes / 10);
+            clock_text_full[4] = '0' + (datetime.minutes % 10);
+            clock_text_full[5] = ':';
+            clock_text_full[6] = '0' + (datetime.seconds / 10);
+            clock_text_full[7] = '0' + (datetime.seconds % 10);
+            clock_text_full[8] = '\0';
+            
+            format_date_string_full(datetime.day, datetime.month, datetime.year, date_text);
+            
+            // Помечаем область часов в таскбаре как dirty
+            vesa_mark_dirty(clock_button_x, clock_button_y, 
+                           clock_button_width, TASKBAR_BUTTON_HEIGHT);
+        }
         
         last_rtc_check = current_ticks;
         initialized = 1;
-        
-        // Помечаем область часов в таскбаре как dirty
-        vesa_mark_dirty(clock_button_x, clock_button_y, 
-                       clock_button_width, TASKBAR_BUTTON_HEIGHT);
     }
 }
 
 static void update_date_menu_time(void) {
     static uint32_t last_second_update = 0;
-    static uint8_t time_label_found = 0;
     static Widget* time_label_widget = NULL;
     
     // Обновляем только если окно открыто
     if (!date_menu_visible || !date_menu_window) return;
     
-    // Если еще не нашли лейбл времени, ищем его
-    if (!time_label_found) {
+    // Находим лейбл времени один раз
+    if (!time_label_widget) {
         Widget* widget = date_menu_window->first_widget;
         while (widget) {
             if (widget->type == WIDGET_LABEL) {
-                // Проверяем по позиции - время должно быть на y=50
-                if (widget->y == date_menu_window->y + 50) {
+                // Ищем лейбл с временем по содержимому
+                if (widget->text && widget->text[2] == ':') { // Проверяем формат HH:MM:SS
                     time_label_widget = widget;
-                    time_label_found = 1;
                     break;
                 }
             }
@@ -174,11 +179,11 @@ static void update_date_menu_time(void) {
         }
     }
     
-    if (!time_label_found || !time_label_widget) return;
+    if (!time_label_widget) return;
     
     uint32_t current_ticks = timer_get_ticks();
     
-    // Обновляем каждые 10 тиков (100ms) для плавного обновления секунд
+    // === ИСПРАВЛЕНИЕ: Обновляем каждые 10 тиков (100ms) ===
     if ((current_ticks - last_second_update) >= 10) {
         rtc_datetime_t datetime;
         cmos_read_datetime(&datetime);
@@ -195,10 +200,17 @@ static void update_date_menu_time(void) {
         new_time[7] = '0' + (datetime.seconds % 10);
         new_time[8] = '\0';
         
-        // Обновляем текст лейбла
-        wg_set_text(time_label_widget, new_time);
-        time_label_widget->needs_redraw = 1;
-        date_menu_window->needs_redraw = 1;
+        // Сравниваем с текущим текстом, обновляем только если изменилось
+        if (!time_label_widget->text || 
+            strncmp(time_label_widget->text, new_time, 8) != 0) {
+            wg_set_text(time_label_widget, new_time);
+            time_label_widget->needs_redraw = 1;
+            date_menu_window->needs_redraw = 1;
+            
+            // Помечаем область окна как dirty
+            vesa_mark_dirty(date_menu_window->x, date_menu_window->y,
+                          date_menu_window->width, date_menu_window->height);
+        }
         
         last_second_update = current_ticks;
     }
@@ -587,8 +599,7 @@ static void create_window_from_start_menu(Widget* button, void* userdata) {
     Window* win = wm_create_window(title_buffer,
                                   x_pos[offset], y_pos[offset],
                                   350, 250,
-                                  WINDOW_CLOSABLE | WINDOW_MOVABLE | 
-                                  WINDOW_HAS_TITLE | WINDOW_MINIMIZABLE);
+                                  WINDOW_CLOSABLE | WINDOW_MOVABLE | WINDOW_HAS_TITLE | WINDOW_MINIMIZABLE);
     
     if (win) {
         wg_create_label(win, "Application", 20, 50);
@@ -617,7 +628,7 @@ void start_menu_create(void) {
     start_menu_window = wm_create_window("Start Menu",
                                         menu_x, menu_y,
                                         250, 250,
-                                        WINDOW_MOVABLE | WINDOW_HAS_TITLE);
+                                        WINDOW_HAS_TITLE);
     
     if (!start_menu_window) return;
     

@@ -1,4 +1,5 @@
 #include "kernel/memory.h"
+#include "kernel/multiboot.h"
 #include "drivers/serial.h"
 #include "drivers/vga.h"
 #include <stddef.h>
@@ -188,6 +189,47 @@ void memory_init(void) {
     serial_puts_num(HEAP_SIZE);
     serial_puts(" bytes\n");
     #endif
+}
+
+// Где-то в memory.c добавляем (можно в конец):
+void memory_init_multiboot(multiboot_info_t* mb_info) {
+    if (!mb_info) {
+        serial_puts("[MEM] No multiboot info for memory init\n");
+        return;
+    }
+    
+    serial_puts("[MEM] Initializing from Multiboot...\n");
+    
+    if (mb_info->flags & (1 << 0)) {
+        // Есть информация о памяти
+        uint32_t mem_lower = mb_info->mem_lower;  // KB до 1MB
+        uint32_t mem_upper = mb_info->mem_upper;  // KB после 1MB
+        
+        serial_puts("[MEM] Lower memory: ");
+        serial_puts_num(mem_lower);
+        serial_puts("KB\n");
+        
+        serial_puts("[MEM] Upper memory: ");
+        serial_puts_num(mem_upper);
+        serial_puts("KB\n");
+        
+        serial_puts("[MEM] Total available: ");
+        serial_puts_num(mem_lower + mem_upper + 1024);  // +1MB (первые 1MB)
+        serial_puts("KB\n");
+        
+        // Можно использовать эту информацию для настройки аллокатора
+        // Например, установить HEAP_SIZE в зависимости от доступной памяти
+    } else {
+        serial_puts("[MEM] No memory info from Multiboot\n");
+    }
+    
+    // Если есть карта памяти - можно ее распарсить
+    if (mb_info->flags & (1 << 6)) {
+        serial_puts("[MEM] Memory map available (");
+        serial_puts_num(mb_info->mmap_length);
+        serial_puts(" bytes)\n");
+        // Здесь можно парсить mmap для продвинутого аллокатора
+    }
 }
 
 // Выделение памяти (основная функция)

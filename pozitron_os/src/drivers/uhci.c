@@ -2,8 +2,9 @@
 #include "drivers/serial.h"
 #include "drivers/ports.h"
 #include "drivers/usb.h"
-#include "drivers/timer.h"
+#include "kernel/memory.h"
 #include <stddef.h>
+#include "lib/string.h"
 
 // Глобальные переменные UHCI
 static uint32_t uhci_base = 0;
@@ -23,25 +24,22 @@ typedef struct {
     uint32_t element_pointer;
 } __attribute__((packed)) uhci_qh_t;
 
-// Статические буферы для дескрипторов
+// Динамические буферы для дескрипторов
 static uhci_td_t* control_td = NULL;
 static uhci_qh_t* control_qh = NULL;
 static uint8_t* setup_buffer = NULL;
 static uint8_t* data_buffer = NULL;
 
-// СВОИ РЕАЛИЗАЦИИ mem* функций для UHCI
-static void uhci_memset(void* ptr, uint8_t value, uint32_t size) {
-    uint8_t* p = (uint8_t*)ptr;
-    for (uint32_t i = 0; i < size; i++) {
-        p[i] = value;
+// Задержка с использованием pause
+static void uhci_delay_ms(uint32_t milliseconds) {
+    for (volatile uint32_t i = 0; i < milliseconds * 1000; i++) {
+        asm volatile ("pause");
     }
 }
 
-static void uhci_memcpy(void* dst, const void* src, uint32_t size) {
-    uint8_t* d = (uint8_t*)dst;
-    const uint8_t* s = (const uint8_t*)src;
-    for (uint32_t i = 0; i < size; i++) {
-        d[i] = s[i];
+static void uhci_delay_us(uint32_t microseconds) {
+    for (volatile uint32_t i = 0; i < microseconds * 10; i++) {
+        asm volatile ("pause");
     }
 }
 
@@ -54,49 +52,58 @@ static void uhci_write_reg(uint16_t reg, uint16_t value) {
     outw(uhci_base + reg, value);
 }
 
-// Задержка
-static void uhci_delay_ms(uint32_t milliseconds) {
-    timer_sleep_ms(milliseconds);
-}
-
-// Аллокация памяти для структур UHCI
-static void* uhci_alloc_align(uint32_t size, uint32_t align) {
-    // Простая аллокация - в реальной ОС нужно использовать memory_alloc
-    static uint8_t mem_pool[8192];
-    static uint32_t mem_offset = 0;
-    
-    uint32_t aligned_offset = (mem_offset + align - 1) & ~(align - 1);
-    
-    if (aligned_offset + size > sizeof(mem_pool)) {
-        serial_puts("[UHCI] ERROR: Memory pool exhausted\n");
-        return NULL;
-    }
-    
-    void* ptr = &mem_pool[aligned_offset];
-    mem_offset = aligned_offset + size;
-    
-    return ptr;
-}
-
-// Инициализация структур UHCI
+// Инициализация структур UHCI с использованием аллокатора
 static int uhci_init_structures(void) {
     // Аллоцируем память для структур
-    control_td = (uhci_td_t*)uhci_alloc_align(sizeof(uhci_td_t) * 4, 16);
-    control_qh = (uhci_qh_t*)uhci_alloc_align(sizeof(uhci_qh_t), 16);
-    setup_buffer = (uint8_t*)uhci_alloc_align(8, 4);
-    data_buffer = (uint8_t*)uhci_alloc_align(USB_MAX_PACKET_SIZE, 4);
+    control_td = (uhci_td_t*)kmalloc(sizeof(uhci_td_t) * 4);
+    if (!control_td) {
+        serial_puts("[UHCI] ERROR: Failed to allocate TD\n");
+        return 0;
+    }
     
-    if (!control_td || !control_qh || !setup_buffer || !data_buffer) {
-        serial_puts("[UHCI] ERROR: Failed to allocate structures\n");
+    control_qh = (uhci_qh_t*)kmalloc(sizeof(uhci_qh_t));
+    if (!control_qh) {
+        kfree(control_td);
+        serial_puts("[UHCI] ERROR: Failed to allocate QH\n");
+        return 0;
+    }
+    
+    setup_buffer = (uint8_t*)kmalloc(8);
+    if (!setup_buffer) {
+        kfree(control_td);
+        kfree(control_qh);
+        serial_puts("[UHCI] ERROR: Failed to allocate setup buffer\n");
+        return 0;
+    }
+    
+    data_buffer = (uint8_t*)kmalloc(USB_MAX_PACKET_SIZE);
+    if (!data_buffer) {
+        kfree(control_td);
+        kfree(control_qh);
+        kfree(setup_buffer);
+        serial_puts("[UHCI] ERROR: Failed to allocate data buffer\n");
         return 0;
     }
     
     // Инициализируем Queue Head
-    uhci_memset(control_qh, 0, sizeof(uhci_qh_t));
+    memset(control_qh, 0, sizeof(uhci_qh_t));
     control_qh->link_pointer = 0x00000001; // Терминируем
     
     serial_puts("[UHCI] Structures initialized\n");
     return 1;
+}
+
+// Освобождение структур
+static void uhci_free_structures(void) {
+    if (control_td) kfree(control_td);
+    if (control_qh) kfree(control_qh);
+    if (setup_buffer) kfree(setup_buffer);
+    if (data_buffer) kfree(data_buffer);
+    
+    control_td = NULL;
+    control_qh = NULL;
+    setup_buffer = NULL;
+    data_buffer = NULL;
 }
 
 // Создание Setup TD
@@ -106,7 +113,7 @@ static uhci_td_t* create_setup_td(uint32_t next_td, uint8_t* setup_data,
     if (!control_td) return NULL;
     
     uhci_td_t* td = &control_td[0];
-    uhci_memset(td, 0, sizeof(uhci_td_t));
+    memset(td, 0, sizeof(uhci_td_t));
     
     // Link Pointer
     td->link_pointer = next_td | 0x00000002; // Указывает на следующий TD, Depth First
@@ -126,7 +133,7 @@ static uhci_td_t* create_setup_td(uint32_t next_td, uint8_t* setup_data,
     
     // Копируем setup данные
     if (setup_data) {
-        uhci_memcpy(setup_buffer, setup_data, 8);
+        memcpy(setup_buffer, setup_data, 8);
     }
     
     return td;
@@ -139,7 +146,7 @@ static uhci_td_t* create_data_td(uint32_t next_td, uint8_t* data, uint16_t lengt
     if (!control_td) return NULL;
     
     uhci_td_t* td = &control_td[1];
-    uhci_memset(td, 0, sizeof(uhci_td_t));
+    memset(td, 0, sizeof(uhci_td_t));
     
     // Link Pointer
     td->link_pointer = next_td | 0x00000002;
@@ -161,8 +168,8 @@ static uhci_td_t* create_data_td(uint32_t next_td, uint8_t* data, uint16_t lengt
     td->buffer_pointer = (uint32_t)data_buffer;
     
     // Копируем данные
-    if (data && length > 0) {
-        uhci_memcpy(data_buffer, data, length);
+    if (data && length > 0 && pid == 0xE1) { // OUT pid
+        memcpy(data_buffer, data, length);
     }
     
     return td;
@@ -174,7 +181,7 @@ static uhci_td_t* create_status_td(uint32_t next_td, uint8_t pid,
     if (!control_td) return NULL;
     
     uhci_td_t* td = &control_td[2];
-    uhci_memset(td, 0, sizeof(uhci_td_t));
+    memset(td, 0, sizeof(uhci_td_t));
     
     // Link Pointer
     td->link_pointer = next_td | 0x00000002;
@@ -197,9 +204,9 @@ static uhci_td_t* create_status_td(uint32_t next_td, uint8_t pid,
 
 // Ожидание завершения TD
 static int wait_for_td_completion(uhci_td_t* td, uint32_t timeout_ms) {
-    uint32_t start_ticks = timer_get_ticks();
+    uint32_t start_time = 0;
     
-    while (timer_get_ticks() - start_ticks < timeout_ms) {
+    while (1) {
         if (!(td->status_control & (1 << 23))) {
             // TD завершен
             if (td->status_control & (1 << 22)) {
@@ -211,10 +218,16 @@ static int wait_for_td_completion(uhci_td_t* td, uint32_t timeout_ms) {
             }
             return 0; // Успех
         }
-        timer_sleep_ms(1);
+        
+        // Простая проверка таймаута
+        if (++start_time > timeout_ms * 1000) {
+            serial_puts("[UHCI] TD timeout\n");
+            return -1;
+        }
+        
+        uhci_delay_us(10); // 10 микросекунд задержки
     }
     
-    serial_puts("[UHCI] TD timeout\n");
     return -1;
 }
 
@@ -293,10 +306,6 @@ int uhci_control_transfer(uint8_t controller_idx,
     // Обновляем очередь
     control_qh->element_pointer = (uint32_t)setup_td | 0x00000002;
     
-    // Ждем фрейма
-    uint16_t frame_num = uhci_read_reg(UHCI_FRNUM);
-    frame_num = (frame_num + 2) & 0x3FF;
-    
     // Устанавливаем Frame List
     uhci_write_reg(UHCI_FLBASEADD, (uint32_t)control_qh);
     
@@ -320,7 +329,7 @@ int uhci_control_transfer(uint8_t controller_idx,
         
         // Если это IN transfer, копируем данные
         if ((bmRequestType & 0x80) && data) {
-            uhci_memcpy(data, data_buffer, wLength);
+            memcpy(data, data_buffer, wLength);
         }
         
         // Переключаем data toggle
@@ -381,56 +390,66 @@ int uhci_interrupt_transfer(uint8_t controller_idx,
         return -1;
     }
     
-    // Создаем TD
-    uhci_td_t td;
-    uhci_memset(&td, 0, sizeof(uhci_td_t));
+    // Используем временные буферы
+    uhci_td_t* td = (uhci_td_t*)kmalloc(sizeof(uhci_td_t));
+    uhci_qh_t* qh = (uhci_qh_t*)kmalloc(sizeof(uhci_qh_t));
+    uint8_t* temp_buffer = (uint8_t*)kmalloc(length);
+    
+    if (!td || !qh || !temp_buffer) {
+        if (td) kfree(td);
+        if (qh) kfree(qh);
+        if (temp_buffer) kfree(temp_buffer);
+        serial_puts("[UHCI] ERROR: Out of memory for transfer\n");
+        return -1;
+    }
+    
+    memset(td, 0, sizeof(uhci_td_t));
+    memset(qh, 0, sizeof(uhci_qh_t));
     
     // Link Pointer (терминируем)
-    td.link_pointer = 0x00000001;
+    td->link_pointer = 0x00000001;
     
     // Status/Control
-    td.status_control = (1 << 23); // Активный
-    td.status_control |= (3 << 19); // 3 ошибки
+    td->status_control = (1 << 23); // Активный
+    td->status_control |= (3 << 19); // 3 ошибки
     if (ep->toggle) {
-        td.status_control |= (1 << 18); // Data Toggle
+        td->status_control |= (1 << 18); // Data Toggle
     }
     
     // Token
     if (direction == USB_ENDPOINT_IN) {
-        td.token = (0x69 << 21); // IN pid
+        td->token = (0x69 << 21); // IN pid
     } else {
-        td.token = (0xE1 << 21); // OUT pid
+        td->token = (0xE1 << 21); // OUT pid
     }
     
-    td.token |= (ep_num << 15);
-    td.token |= (dev->address << 8);
-    td.token |= ((length - 1) << 0);
+    td->token |= (ep_num << 15);
+    td->token |= (dev->address << 8);
+    td->token |= ((length - 1) << 0);
     
     // Buffer Pointer
-    td.buffer_pointer = (uint32_t)data_buffer;
+    td->buffer_pointer = (uint32_t)temp_buffer;
     
     // Копируем данные для OUT
     if (direction == USB_ENDPOINT_OUT && length > 0) {
-        uhci_memcpy(data_buffer, buffer, length);
+        memcpy(temp_buffer, buffer, length);
     }
     
-    // Создаем временный QH
-    uhci_qh_t qh;
-    uhci_memset(&qh, 0, sizeof(uhci_qh_t));
-    qh.link_pointer = 0x00000001;
-    qh.element_pointer = (uint32_t)&td | 0x00000002;
+    // Инициализируем QH
+    qh->link_pointer = 0x00000001;
+    qh->element_pointer = (uint32_t)td | 0x00000002;
     
     // Устанавливаем Frame List
-    uhci_write_reg(UHCI_FLBASEADD, (uint32_t)&qh);
+    uhci_write_reg(UHCI_FLBASEADD, (uint32_t)qh);
     
     // Ждем завершения
-    uint32_t start_ticks = timer_get_ticks();
+    uint32_t start_time = 0;
     int result = -1;
     
-    while (timer_get_ticks() - start_ticks < timeout_ms) {
-        if (!(td.status_control & (1 << 23))) {
+    while (start_time < timeout_ms * 1000) {
+        if (!(td->status_control & (1 << 23))) {
             // TD завершен
-            if (td.status_control & (1 << 22)) {
+            if (td->status_control & (1 << 22)) {
                 // Ошибка
                 serial_puts("[UHCI] Interrupt TD error\n");
                 break;
@@ -441,15 +460,22 @@ int uhci_interrupt_transfer(uint8_t controller_idx,
             
             // Копируем данные для IN
             if (direction == USB_ENDPOINT_IN && length > 0) {
-                uhci_memcpy(buffer, data_buffer, length);
+                memcpy(buffer, temp_buffer, length);
             }
             
             // Переключаем data toggle
             ep->toggle ^= 1;
             break;
         }
-        timer_sleep_ms(1);
+        
+        start_time++;
+        uhci_delay_us(10);
     }
+    
+    // Освобождаем временные буферы
+    kfree(td);
+    kfree(qh);
+    kfree(temp_buffer);
     
     if (result < 0) {
         serial_puts("[UHCI] Interrupt transfer timeout\n");
@@ -466,16 +492,15 @@ void uhci_init(uint32_t base) {
     
     uhci_base = base;
     
-    // 1. Останавливаем контроллер
+    // 1. Проверяем доступность контроллера
+    if (base == 0 || base == 0xFFFFFFFF) {
+        serial_puts("[UHCI] ERROR: Invalid base address\n");
+        return;
+    }
+    
+    // 2. Останавливаем контроллер
     uhci_write_reg(UHCI_CMD, 0);
     uhci_delay_ms(10);
-    
-    // 2. Проверяем если уже запущен
-    if (!(uhci_read_reg(UHCI_STS) & UHCI_STS_HCHALTED)) {
-        serial_puts("[UHCI] Controller was running, stopping...\n");
-        uhci_write_reg(UHCI_CMD, 0);
-        uhci_delay_ms(100);
-    }
     
     // 3. Сброс контроллера
     uhci_write_reg(UHCI_CMD, UHCI_CMD_HCRESET);
@@ -518,6 +543,7 @@ void uhci_init(uint32_t base) {
     uint16_t status = uhci_read_reg(UHCI_STS);
     if (status & UHCI_STS_HCHALTED) {
         serial_puts("[UHCI] ERROR: Controller halted after start\n");
+        uhci_free_structures();
         return;
     }
     
@@ -590,20 +616,20 @@ void uhci_poll(void) {
     if (!uhci_initialized) return;
     
     static uint32_t last_poll = 0;
-    uint32_t current_ticks = timer_get_ticks();
+    uint32_t current_time = 0;
     
-    if (current_ticks - last_poll < 500) {
+    if (current_time - last_poll < 500) {
         return;
     }
     
-    last_poll = current_ticks;
+    last_poll = current_time;
     
     // Проверяем порты на подключение/отключение
     for (uint8_t port = 0; port < uhci_ports; port++) {
         uint16_t port_addr = (port == 0) ? UHCI_PORTSC1 : UHCI_PORTSC2;
         uint16_t port_status = uhci_read_reg(port_addr);
         
-        // Можно добавить логику обнаружения изменений
+        // Просто для устранения предупреждения компилятора
         (void)port_status;
     }
 }

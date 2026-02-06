@@ -17,6 +17,7 @@ CFLAGS="-m32 -ffreestanding -O1 -Wall -I./include"
 # Ядро и утилиты
 gcc $CFLAGS -c src/kernel/main.c -o build/main.o
 gcc $CFLAGS -c src/kernel/memory.c -o build/memory.o
+gcc $CFLAGS -c src/kernel/multiboot.c -o build/multiboot.o
 
 # Драйверы
 gcc $CFLAGS -c src/drivers/serial.c -o build/serial.o
@@ -52,11 +53,14 @@ gcc $CFLAGS -c src/gui/shutdown.c -o build/shutdown.o
 
 gcc $CFLAGS -c src/hw/scanner.c -o build/scanner.o
 
+gcc $CFLAGS -c src/lib/string.c -o build/string.o
+
 echo "Linking..."
 ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/boot.o \
     build/main.o \
     build/memory.o \
+    build/multiboot.o \
     build/gdt.o \
     build/gdt_asm.o \
     build/idt.o \
@@ -88,6 +92,7 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/ehci.o \
     build/ohci.o \
     build/hid.o \
+    build/string.o \
     -nostdlib
 
 echo "Creating ISO..."
@@ -97,4 +102,4 @@ cp grub/grub.cfg iso/boot/grub/
 grub-mkrescue -o pozitron.iso iso/
 
 echo "Build complete!"
-qemu-system-i386 -cdrom pozitron.iso -serial stdio -usb -device usb-tablet
+qemu-system-i386 -cdrom pozitron.iso -serial stdio

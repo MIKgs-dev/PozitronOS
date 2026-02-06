@@ -1,6 +1,7 @@
 #include "drivers/vesa.h"
 #include "drivers/serial.h"
 #include <stddef.h>
+#include "kernel/multiboot.h"
 
 // Статические переменные для состояния курсора
 static uint32_t cursor_backup[16 * 16];
@@ -38,17 +39,40 @@ static void cursor_save_background(uint32_t x, uint32_t y) {
     struct fb_info* fb = vesa_get_info();
     if(!fb || !fb->found || !cursor_enabled) return;
     
+    // Если курсор полностью за пределами экрана, ничего не сохраняем
+    if (x >= fb->width || y >= fb->height) {
+        // Очищаем backup
+        for(int i = 0; i < 16 * 16; i++) {
+            cursor_backup[i] = 0;
+        }
+        return;
+    }
+    
     uint32_t* buffer = vesa_is_double_buffer_enabled() ? vesa_get_back_buffer() : fb->address;
     if (!buffer) return;
     
     for(int dy = 0; dy < 16; dy++) {
+        uint32_t py = y + dy;
+        
+        // Проверяем границы для строки
+        if(py >= fb->height) {
+            // Если строка за пределами экрана, заполняем нулями
+            for(int dx = 0; dx < 16; dx++) {
+                cursor_backup[dy * 16 + dx] = 0;
+            }
+            continue;
+        }
+        
         for(int dx = 0; dx < 16; dx++) {
             uint32_t px = x + dx;
-            uint32_t py = y + dy;
             
-            if(px < fb->width && py < fb->height) {
-                cursor_backup[dy * 16 + dx] = buffer[py * fb->width + px];
+            // Проверяем границы для столбца
+            if(px >= fb->width) {
+                cursor_backup[dy * 16 + dx] = 0;
+                continue;
             }
+            
+            cursor_backup[dy * 16 + dx] = buffer[py * fb->width + px];
         }
     }
 }
@@ -58,13 +82,22 @@ static void cursor_restore_background(uint32_t x, uint32_t y) {
     struct fb_info* fb = vesa_get_info();
     if(!fb || !fb->found || !cursor_enabled || !cursor_is_drawn) return;
     
+    // Если курсор был полностью за пределами экрана, нечего восстанавливать
+    if (x >= fb->width || y >= fb->height) {
+        cursor_is_drawn = 0;
+        return;
+    }
+    
     uint32_t* buffer = vesa_is_double_buffer_enabled() ? vesa_get_back_buffer() : fb->address;
     if (!buffer) return;
     
     for(int dy = 0; dy < 16; dy++) {
+        uint32_t py = y + dy;
+        
+        if(py >= fb->height) continue;
+        
         for(int dx = 0; dx < 16; dx++) {
             uint32_t px = x + dx;
-            uint32_t py = y + dy;
             
             if(px < fb->width && py < fb->height) {
                 buffer[py * fb->width + px] = cursor_backup[dy * 16 + dx];
@@ -82,6 +115,9 @@ static void cursor_draw(uint32_t x, uint32_t y) {
     struct fb_info* fb = vesa_get_info();
     if(!fb || !fb->found) return;
     
+    // Проверяем, находится ли курсор хотя бы частично в пределах экрана
+    if (x >= fb->width || y >= fb->height) return;
+    
     // Сохраняем фон
     cursor_save_background(x, y);
     
@@ -91,23 +127,26 @@ static void cursor_draw(uint32_t x, uint32_t y) {
     // Сначала рисуем черную обводку
     for(int dy = 0; dy < 16; dy++) {
         uint16_t row = cursor_bitmap[dy];
+        uint32_t py = y + dy;
+        
+        // Проверяем чтобы строка была в пределах экрана
+        if(py >= fb->height) continue;
+        
         for(int dx = 0; dx < 16; dx++) {
             if(row & (1 << (15 - dx))) {
                 uint32_t px = x + dx;
-                uint32_t py = y + dy;
                 
-                if(px < fb->width && py < fb->height) {
-                    // Рисуем черную обводку вокруг белого курсора
-                    // Верхний левый угол - более толстая обводка для лучшей видимости
-                    
-                    // Основной черный контур (смещение +1)
-                    if(px + 1 < fb->width) buffer[py * fb->width + (px + 1)] = 0x000000;
-                    if(py + 1 < fb->height) buffer[(py + 1) * fb->width + px] = 0x000000;
-                    
-                    // Дополнительный контур для лучшей видимости
-                    if(px > 0) buffer[py * fb->width + (px - 1)] = 0x000000;
-                    if(py > 0) buffer[(py - 1) * fb->width + px] = 0x000000;
-                }
+                // Проверяем чтобы пиксель был в пределах экрана
+                if(px >= fb->width) continue;
+                
+                // Рисуем черную обводку вокруг белого курсора
+                // Основной черный контур (смещение +1)
+                if(px + 1 < fb->width) buffer[py * fb->width + (px + 1)] = 0x000000;
+                if(py + 1 < fb->height) buffer[(py + 1) * fb->width + px] = 0x000000;
+                
+                // Дополнительный контур для лучшей видимости
+                if(px > 0) buffer[py * fb->width + (px - 1)] = 0x000000;
+                if(py > 0) buffer[(py - 1) * fb->width + px] = 0x000000;
             }
         }
     }
@@ -115,10 +154,13 @@ static void cursor_draw(uint32_t x, uint32_t y) {
     // Затем рисуем белый курсор поверх
     for(int dy = 0; dy < 16; dy++) {
         uint16_t row = cursor_bitmap[dy];
+        uint32_t py = y + dy;
+        
+        if(py >= fb->height) continue;
+        
         for(int dx = 0; dx < 16; dx++) {
             if(row & (1 << (15 - dx))) {
                 uint32_t px = x + dx;
-                uint32_t py = y + dy;
                 
                 if(px < fb->width && py < fb->height) {
                     buffer[py * fb->width + px] = 0xFFFFFF;
@@ -134,15 +176,30 @@ static void cursor_draw(uint32_t x, uint32_t y) {
 
 // Инициализация системы курсора
 void vesa_cursor_init(void) {
-    cursor_x = 400;
-    cursor_y = 300;
+    struct fb_info* fb = vesa_get_info();
+    
+    if (fb && fb->found) {
+        // Помещаем курсор в центр экрана
+        cursor_x = fb->width / 2;
+        cursor_y = fb->height / 2;
+    } else {
+        // Запасные значения на случай если VESA ещё не инициализирован
+        cursor_x = 400;
+        cursor_y = 300;
+    }
+    
     cursor_visible = 1;
     cursor_enabled = 1;
     cursor_need_update = 1;
     cursor_is_drawn = 0;
     last_cursor_x = 0;
     last_cursor_y = 0;
-    serial_puts("[CURSOR] Cursor system initialized\n");
+    
+    if (fb && fb->found) {
+        serial_puts_num(cursor_x);
+        serial_puts("x");
+        serial_puts_num(cursor_y);
+    }
 }
 
 // Обновление курсора
@@ -152,11 +209,14 @@ void vesa_cursor_update(void) {
     struct fb_info* fb = vesa_get_info();
     if(!fb || !fb->found) return;
     
-    // Ограничиваем позицию
-    if(cursor_x > fb->width - 16) cursor_x = fb->width - 16;
-    if(cursor_y > fb->height - 16) cursor_y = fb->height - 16;
+    // === ИСПРАВЛЕННАЯ ВЕРСИЯ ===
+    // Ограничиваем только отрицательные значения
     if(cursor_x < 0) cursor_x = 0;
     if(cursor_y < 0) cursor_y = 0;
+    
+    // УБЕРАЕМ ограничения по правому и нижнему краю!
+    // Вместо этого позволяем курсору доходить до fb->width и fb->height
+    // (проверка границ будет в cursor_draw())
     
     // Если нужно обновить или позиция изменилась
     if (cursor_need_update || cursor_x != last_cursor_x || cursor_y != last_cursor_y) {
@@ -165,7 +225,7 @@ void vesa_cursor_update(void) {
             cursor_restore_background(last_cursor_x, last_cursor_y);
         }
         
-        // Рисуем курсор в новой позиции
+        // Рисуем курсор в новой позиции (он сам проверит границы)
         if (cursor_visible) {
             cursor_draw(cursor_x, cursor_y);
         }
@@ -176,6 +236,8 @@ void vesa_cursor_update(void) {
 
 // Публичные функции
 void vesa_set_cursor_pos(uint32_t x, uint32_t y) {
+    struct fb_info* fb = vesa_get_info();
+    
     if (cursor_x != x || cursor_y != y) {
         cursor_x = x;
         cursor_y = y;

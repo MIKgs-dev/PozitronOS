@@ -2,8 +2,9 @@
 #include "drivers/serial.h"
 #include "drivers/ports.h"
 #include "drivers/usb.h"
-#include "drivers/timer.h"
+#include "kernel/memory.h"
 #include <stddef.h>
+#include "lib/string.h"
 
 // Глобальные переменные EHCI
 static uint32_t ehci_cap_base = 0;
@@ -33,26 +34,23 @@ typedef struct {
     uint32_t reserved[3];
 } __attribute__((packed)) ehci_qh_t;
 
-// Статические буферы
+// Динамические буферы
 static ehci_qtd_t* control_qtd = NULL;
 static ehci_qh_t* control_qh = NULL;
 static ehci_qh_t* async_qh = NULL;
 static uint8_t* setup_buffer = NULL;
 static uint8_t* data_buffer = NULL;
 
-// СВОИ РЕАЛИЗАЦИИ mem* функций для EHCI
-static void ehci_memset(void* ptr, uint8_t value, uint32_t size) {
-    uint8_t* p = (uint8_t*)ptr;
-    for (uint32_t i = 0; i < size; i++) {
-        p[i] = value;
+// Задержка с использованием pause
+static void ehci_delay_ms(uint32_t milliseconds) {
+    for (volatile uint32_t i = 0; i < milliseconds * 1000; i++) {
+        asm volatile ("pause");
     }
 }
 
-static void ehci_memcpy(void* dst, const void* src, uint32_t size) {
-    uint8_t* d = (uint8_t*)dst;
-    const uint8_t* s = (const uint8_t*)src;
-    for (uint32_t i = 0; i < size; i++) {
-        d[i] = s[i];
+static void ehci_delay_us(uint32_t microseconds) {
+    for (volatile uint32_t i = 0; i < microseconds * 10; i++) {
+        asm volatile ("pause");
     }
 }
 
@@ -69,54 +67,76 @@ static void ehci_write_op_reg(uint32_t reg, uint32_t value) {
     outl(ehci_op_base + reg, value);
 }
 
-static void ehci_delay_ms(uint32_t milliseconds) {
-    timer_sleep_ms(milliseconds);
-}
-
-// Аллокация памяти для EHCI
-static void* ehci_alloc_align(uint32_t size, uint32_t align) {
-    static uint8_t mem_pool[16384];
-    static uint32_t mem_offset = 0;
-    
-    uint32_t aligned_offset = (mem_offset + align - 1) & ~(align - 1);
-    
-    if (aligned_offset + size > sizeof(mem_pool)) {
-        serial_puts("[EHCI] ERROR: Memory pool exhausted\n");
-        return NULL;
+// Инициализация структур EHCI с использованием аллокатора
+static int ehci_init_structures(void) {
+    // Выделяем память с правильным выравниванием
+    control_qh = (ehci_qh_t*)kmalloc(sizeof(ehci_qh_t));
+    if (!control_qh) {
+        serial_puts("[EHCI] ERROR: Failed to allocate control QH\n");
+        return 0;
     }
     
-    void* ptr = &mem_pool[aligned_offset];
-    mem_offset = aligned_offset + size;
+    async_qh = (ehci_qh_t*)kmalloc(sizeof(ehci_qh_t));
+    if (!async_qh) {
+        kfree(control_qh);
+        serial_puts("[EHCI] ERROR: Failed to allocate async QH\n");
+        return 0;
+    }
     
-    return ptr;
-}
-
-// Инициализация структур EHCI
-static int ehci_init_structures(void) {
-    // QH должен быть выровнен по 32 байта
-    control_qh = (ehci_qh_t*)ehci_alloc_align(sizeof(ehci_qh_t), 32);
-    async_qh = (ehci_qh_t*)ehci_alloc_align(sizeof(ehci_qh_t), 32);
-    control_qtd = (ehci_qtd_t*)ehci_alloc_align(sizeof(ehci_qtd_t) * 4, 32);
-    setup_buffer = (uint8_t*)ehci_alloc_align(8, 4);
-    data_buffer = (uint8_t*)ehci_alloc_align(USB_MAX_PACKET_SIZE, 4);
+    control_qtd = (ehci_qtd_t*)kmalloc(sizeof(ehci_qtd_t) * 4);
+    if (!control_qtd) {
+        kfree(control_qh);
+        kfree(async_qh);
+        serial_puts("[EHCI] ERROR: Failed to allocate QTDs\n");
+        return 0;
+    }
     
-    if (!control_qh || !async_qh || !control_qtd || !setup_buffer || !data_buffer) {
-        serial_puts("[EHCI] ERROR: Failed to allocate structures\n");
+    setup_buffer = (uint8_t*)kmalloc(8);
+    if (!setup_buffer) {
+        kfree(control_qh);
+        kfree(async_qh);
+        kfree(control_qtd);
+        serial_puts("[EHCI] ERROR: Failed to allocate setup buffer\n");
+        return 0;
+    }
+    
+    data_buffer = (uint8_t*)kmalloc(USB_MAX_PACKET_SIZE);
+    if (!data_buffer) {
+        kfree(control_qh);
+        kfree(async_qh);
+        kfree(control_qtd);
+        kfree(setup_buffer);
+        serial_puts("[EHCI] ERROR: Failed to allocate data buffer\n");
         return 0;
     }
     
     // Инициализируем Control QH
-    ehci_memset(control_qh, 0, sizeof(ehci_qh_t));
+    memset(control_qh, 0, sizeof(ehci_qh_t));
     control_qh->horiz_link = 0x00000001; // Терминируем
     control_qh->charac = (1 << 15) | (1 << 12); // Head of Reclamation List, Control endpoint
     
     // Инициализируем Async QH
-    ehci_memset(async_qh, 0, sizeof(ehci_qh_t));
+    memset(async_qh, 0, sizeof(ehci_qh_t));
     async_qh->horiz_link = 0x00000001;
     async_qh->charac = (1 << 15); // Head of Reclamation List
     
     serial_puts("[EHCI] Structures initialized\n");
     return 1;
+}
+
+// Освобождение структур
+static void ehci_free_structures(void) {
+    if (control_qh) kfree(control_qh);
+    if (async_qh) kfree(async_qh);
+    if (control_qtd) kfree(control_qtd);
+    if (setup_buffer) kfree(setup_buffer);
+    if (data_buffer) kfree(data_buffer);
+    
+    control_qh = NULL;
+    async_qh = NULL;
+    control_qtd = NULL;
+    setup_buffer = NULL;
+    data_buffer = NULL;
 }
 
 // Создание Setup QTD
@@ -126,7 +146,7 @@ static ehci_qtd_t* create_setup_qtd(ehci_qtd_t* next_qtd, uint8_t* setup_data,
     if (!control_qtd) return NULL;
     
     ehci_qtd_t* qtd = &control_qtd[0];
-    ehci_memset(qtd, 0, sizeof(ehci_qtd_t));
+    memset(qtd, 0, sizeof(ehci_qtd_t));
     
     // Next QTD
     qtd->next_qtd = next_qtd ? (uint32_t)next_qtd : 0x00000001;
@@ -149,7 +169,7 @@ static ehci_qtd_t* create_setup_qtd(ehci_qtd_t* next_qtd, uint8_t* setup_data,
     
     // Копируем setup данные
     if (setup_data) {
-        ehci_memcpy(setup_buffer, setup_data, 8);
+        memcpy(setup_buffer, setup_data, 8);
     }
     
     return qtd;
@@ -162,7 +182,7 @@ static ehci_qtd_t* create_data_qtd(ehci_qtd_t* next_qtd, uint8_t* data, uint16_t
     if (!control_qtd) return NULL;
     
     ehci_qtd_t* qtd = &control_qtd[1];
-    ehci_memset(qtd, 0, sizeof(ehci_qtd_t));
+    memset(qtd, 0, sizeof(ehci_qtd_t));
     
     // Next QTD
     qtd->next_qtd = next_qtd ? (uint32_t)next_qtd : 0x00000001;
@@ -185,7 +205,7 @@ static ehci_qtd_t* create_data_qtd(ehci_qtd_t* next_qtd, uint8_t* data, uint16_t
     
     // Копируем данные для OUT
     if (pid == 1 && data && length > 0) { // OUT PID = 1
-        ehci_memcpy(data_buffer, data, length);
+        memcpy(data_buffer, data, length);
     }
     
     return qtd;
@@ -197,7 +217,7 @@ static ehci_qtd_t* create_status_qtd(ehci_qtd_t* next_qtd, uint8_t pid,
     if (!control_qtd) return NULL;
     
     ehci_qtd_t* qtd = &control_qtd[2];
-    ehci_memset(qtd, 0, sizeof(ehci_qtd_t));
+    memset(qtd, 0, sizeof(ehci_qtd_t));
     
     // Next QTD
     qtd->next_qtd = next_qtd ? (uint32_t)next_qtd : 0x00000001;
@@ -222,9 +242,9 @@ static ehci_qtd_t* create_status_qtd(ehci_qtd_t* next_qtd, uint8_t pid,
 
 // Ожидание завершения QTD
 static int wait_for_qtd_completion(ehci_qtd_t* qtd, uint32_t timeout_ms) {
-    uint32_t start_ticks = timer_get_ticks();
+    uint32_t start_time = 0;
     
-    while (timer_get_ticks() - start_ticks < timeout_ms) {
+    while (start_time < timeout_ms * 1000) {
         uint32_t status = (qtd->token >> 14) & 0x03;
         
         if (status != 0) {
@@ -238,7 +258,9 @@ static int wait_for_qtd_completion(ehci_qtd_t* qtd, uint32_t timeout_ms) {
                 return -1;
             }
         }
-        ehci_delay_ms(1);
+        
+        start_time++;
+        ehci_delay_us(10);
     }
     
     serial_puts("[EHCI] QTD timeout\n");
@@ -346,7 +368,7 @@ int ehci_control_transfer(uint8_t controller_idx,
         
         // Если это IN transfer, копируем данные
         if ((bmRequestType & 0x80) && data) {
-            ehci_memcpy(data, data_buffer, wLength);
+            memcpy(data, data_buffer, wLength);
         }
         
         // Переключаем data toggle
@@ -409,52 +431,62 @@ int ehci_interrupt_transfer(uint8_t controller_idx,
         return -1;
     }
     
-    // Создаем QTD
-    ehci_qtd_t qtd;
-    ehci_memset(&qtd, 0, sizeof(ehci_qtd_t));
+    // Используем временные буферы
+    ehci_qtd_t* qtd = (ehci_qtd_t*)kmalloc(sizeof(ehci_qtd_t));
+    ehci_qh_t* qh = (ehci_qh_t*)kmalloc(sizeof(ehci_qh_t));
+    uint8_t* temp_buffer = (uint8_t*)kmalloc(length);
+    
+    if (!qtd || !qh || !temp_buffer) {
+        if (qtd) kfree(qtd);
+        if (qh) kfree(qh);
+        if (temp_buffer) kfree(temp_buffer);
+        serial_puts("[EHCI] ERROR: Out of memory for transfer\n");
+        return -1;
+    }
+    
+    memset(qtd, 0, sizeof(ehci_qtd_t));
+    memset(qh, 0, sizeof(ehci_qh_t));
     
     // Next QTD
-    qtd.next_qtd = 0x00000001;
+    qtd->next_qtd = 0x00000001;
     
     // Alt Next QTD
-    qtd.alt_next_qtd = 0x00000001;
+    qtd->alt_next_qtd = 0x00000001;
     
     // Token
-    qtd.token = ((length - 1) << 0); // Total Bytes
-    qtd.token |= (1 << 8); // IOC = 1 для прерываний
-    qtd.token |= (1 << 9); // C_PAGE = 1
-    qtd.token |= (0 << 10); // ERR_CNT = 0
-    qtd.token |= ((direction == USB_ENDPOINT_IN ? 2 : 1) << 12); // PID
-    qtd.token |= (0 << 14); // Status = Active
-    qtd.token |= (ep->toggle << 16); // Data Toggle
-    qtd.token |= (ep->max_packet_size << 16); // Max Packet Length
+    qtd->token = ((length - 1) << 0); // Total Bytes
+    qtd->token |= (1 << 8); // IOC = 1 для прерываний
+    qtd->token |= (1 << 9); // C_PAGE = 1
+    qtd->token |= (0 << 10); // ERR_CNT = 0
+    qtd->token |= ((direction == USB_ENDPOINT_IN ? 2 : 1) << 12); // PID
+    qtd->token |= (0 << 14); // Status = Active
+    qtd->token |= (ep->toggle << 16); // Data Toggle
+    qtd->token |= (ep->max_packet_size << 16); // Max Packet Length
     
     // Buffer Pointer
-    qtd.buffer[0] = (uint32_t)data_buffer;
+    qtd->buffer[0] = (uint32_t)temp_buffer;
     
     // Копируем данные для OUT
     if (direction == USB_ENDPOINT_OUT && length > 0) {
-        ehci_memcpy(data_buffer, buffer, length);
+        memcpy(temp_buffer, buffer, length);
     }
     
-    // Создаем временный QH
-    ehci_qh_t qh;
-    ehci_memset(&qh, 0, sizeof(ehci_qh_t));
-    qh.horiz_link = 0x00000001;
-    qh.curr_qtd = (uint32_t)&qtd;
-    qh.next_qtd = (uint32_t)&qtd;
-    qh.alt_next_qtd = (uint32_t)&qtd;
+    // Инициализируем QH
+    qh->horiz_link = 0x00000001;
+    qh->curr_qtd = (uint32_t)qtd;
+    qh->next_qtd = (uint32_t)qtd;
+    qh->alt_next_qtd = (uint32_t)qtd;
     
     // Запускаем передачу
-    async_qh->horiz_link = (uint32_t)&qh | 0x00000002;
+    async_qh->horiz_link = (uint32_t)qh | 0x00000002;
     ehci_write_op_reg(0x20, (uint32_t)async_qh);
     
     // Ждем завершения
-    uint32_t start_ticks = timer_get_ticks();
+    uint32_t start_time = 0;
     int result = -1;
     
-    while (timer_get_ticks() - start_ticks < timeout_ms) {
-        uint32_t status = (qtd.token >> 14) & 0x03;
+    while (start_time < timeout_ms * 1000) {
+        uint32_t status = (qtd->token >> 14) & 0x03;
         
         if (status != 0) {
             if (status == 1) {
@@ -463,7 +495,7 @@ int ehci_interrupt_transfer(uint8_t controller_idx,
                 
                 // Копируем данные для IN
                 if (direction == USB_ENDPOINT_IN && length > 0) {
-                    ehci_memcpy(buffer, data_buffer, length);
+                    memcpy(buffer, temp_buffer, length);
                 }
                 
                 // Переключаем data toggle
@@ -473,11 +505,18 @@ int ehci_interrupt_transfer(uint8_t controller_idx,
             }
             break;
         }
-        ehci_delay_ms(1);
+        
+        start_time++;
+        ehci_delay_us(10);
     }
     
     // Останавливаем передачу
     ehci_write_op_reg(0x20, 0);
+    
+    // Освобождаем временные буферы
+    kfree(qtd);
+    kfree(qh);
+    kfree(temp_buffer);
     
     if (result < 0) {
         serial_puts("[EHCI] Interrupt transfer timeout\n");
@@ -497,13 +536,20 @@ void ehci_init(uint32_t cap_base, uint32_t op_base) {
     ehci_cap_base = cap_base;
     ehci_op_base = op_base;
     
-    // 1. Инициализируем структуры
+    // 1. Проверяем доступность контроллера
+    if (cap_base == 0 || op_base == 0 || 
+        cap_base == 0xFFFFFFFF || op_base == 0xFFFFFFFF) {
+        serial_puts("[EHCI] ERROR: Invalid base addresses\n");
+        return;
+    }
+    
+    // 2. Инициализируем структуры
     if (!ehci_init_structures()) {
         serial_puts("[EHCI] ERROR: Failed to init structures\n");
         return;
     }
     
-    // 2. Получаем количество портов
+    // 3. Получаем количество портов
     uint32_t hcsparams = ehci_read_cap_reg(EHCI_HCSPARAMS);
     ehci_ports = (hcsparams >> 0) & 0x0F;
     
@@ -511,37 +557,39 @@ void ehci_init(uint32_t cap_base, uint32_t op_base) {
     serial_puts_num(ehci_ports);
     serial_puts("\n");
     
-    // 3. Останавливаем контроллер
+    // 4. Останавливаем контроллер
     ehci_write_op_reg(EHCI_USBCMD, 0);
     ehci_delay_ms(10);
     
-    // 4. Ждем остановки
+    // 5. Ждем остановки
     uint32_t timeout = 1000;
     while (timeout-- && !(ehci_read_op_reg(EHCI_USBSTS) & EHCI_STS_HALTED)) {
-        ehci_delay_ms(1);
+        ehci_delay_us(100);
     }
     
     if (timeout == 0) {
         serial_puts("[EHCI] WARNING: Could not stop controller\n");
+        ehci_free_structures();
         return;
     }
     
-    // 5. Сброс контроллера
+    // 6. Сброс контроллера
     ehci_write_op_reg(EHCI_USBCMD, EHCI_CMD_RESET);
     ehci_delay_ms(50);
     
     // Ждем сброса
     timeout = 1000;
     while (timeout-- && (ehci_read_op_reg(EHCI_USBCMD) & EHCI_CMD_RESET)) {
-        ehci_delay_ms(1);
+        ehci_delay_us(100);
     }
     
     if (timeout == 0) {
         serial_puts("[EHCI] ERROR: Reset timeout\n");
+        ehci_free_structures();
         return;
     }
     
-    // 6. Включаем порты
+    // 7. Включаем порты
     for (uint8_t port = 0; port < ehci_ports; port++) {
         uint32_t portsc = ehci_read_op_reg(EHCI_PORTSC + (port * 4));
         
@@ -553,14 +601,15 @@ void ehci_init(uint32_t cap_base, uint32_t op_base) {
         }
     }
     
-    // 7. Включаем Async Schedule
+    // 8. Включаем Async Schedule
     ehci_write_op_reg(EHCI_USBCMD, EHCI_CMD_RUN | EHCI_CMD_ASYNC_EN);
     ehci_delay_ms(10);
     
-    // 8. Проверяем статус
+    // 9. Проверяем статус
     uint32_t status = ehci_read_op_reg(EHCI_USBSTS);
     if (status & EHCI_STS_HALTED) {
         serial_puts("[EHCI] ERROR: Controller halted\n");
+        ehci_free_structures();
         return;
     }
     

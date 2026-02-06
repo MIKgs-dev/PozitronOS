@@ -146,12 +146,8 @@ void mouse_handler(registers_t* regs) {
             mouse.public.dy = dy;
             
             // Ограничиваем экраном
-            if(mouse.public.x < 0) mouse.public.x = 0;
-            if(mouse.public.y < 0) mouse.public.y = 0;
-            if(mouse.public.x >= (int32_t)mouse.screen_width) 
-                mouse.public.x = mouse.screen_width - 1;
-            if(mouse.public.y >= (int32_t)mouse.screen_height) 
-                mouse.public.y = mouse.screen_height - 1;
+             if(mouse.public.x < 0) mouse.public.x = 0;
+             if(mouse.public.y < 0) mouse.public.y = 0;
             
             event_t move_event;
             move_event.type = EVENT_MOUSE_MOVE;

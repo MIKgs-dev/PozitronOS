@@ -17,6 +17,7 @@
 #include "drivers/ata.h"
 #include "drivers/usb.h"
 #include "drivers/hid.h"
+#include "kernel/multiboot_util.h"
 #include <stddef.h>
 
 static uint8_t system_running = 1;
@@ -491,8 +492,11 @@ static void handle_keyboard_events(event_t* event) {
 }
 
 // ============ ГЛАВНАЯ ФУНКЦИЯ ============
-void kernel_main() {
+void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     // Инициализация системы
+    multiboot_dump_info(mb_info);
+    memory_init_multiboot(mb_info);
+
     serial_init();
     vga_init();
     vga_puts("\n");
@@ -533,11 +537,10 @@ void kernel_main() {
     vga_puts("[ OK ] HID OK\n");
     
     // Графика
-    if(!vesa_init()) {
+    if(!vesa_init(mb_info)) {
         vga_puts("[ERROR] VBE/VESA INITIALISATION FAILED\n");
     } else {
         vga_puts("[ OK ] VBE/VESA OK\n");
-        vga_puts("[INFO] VBE/VESA START WITH 1024x768x32\n");
     }
     
     uint32_t screen_width = vesa_get_width();
@@ -567,7 +570,7 @@ void kernel_main() {
     vga_puts("[INFO] STARTUP GUI ENVIRONMENT\n");
     gui_init(screen_width, screen_height);
     taskbar_init();
-    create_demo_ui();
+    //create_demo_ui();
     vga_puts("[ OK ] GUI ENVIRONMENT OK\n");
     
     // Информация в serial

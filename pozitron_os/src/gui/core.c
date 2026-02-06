@@ -589,6 +589,7 @@ void gui_render(void) {
                     switch (widget->state) {
                         case STATE_HOVER: btn_color = WINDOW_BUTTON_HOVER; break;
                         case STATE_PRESSED: btn_color = WINDOW_BUTTON_PRESSED; break;
+                        case STATE_DISABLED: btn_color = 0xCCCCCC; break;
                         default: btn_color = WINDOW_BUTTON_COLOR; break;
                     }
                     
@@ -601,14 +602,42 @@ void gui_render(void) {
                                  1, widget->height, WINDOW_BORDER_COLOR);
                     
                     if (widget->text) {
-                        uint32_t text_len = gui_strlen(widget->text);
-                        uint32_t text_x = widget->x + (widget->width - text_len * 8) / 2;
-                        uint32_t text_y = widget->y + (widget->height - 16) / 2;
-                        
-                        if (text_x < widget->x + 4) text_x = widget->x + 4;
-                        if (text_y < widget->y + 2) text_y = widget->y + 2;
-                        
-                        vesa_draw_text(text_x, text_y, widget->text, 0x000000, btn_color);
+                        // === ИСПРАВЛЕНИЕ ДЛЯ ДЛИННОГО ТЕКСТА ===
+                        uint32_t text_color = (widget->state == STATE_DISABLED) ? 0x888888 : 0x000000;
+                        uint32_t text_len = 0;
+                        while (widget->text[text_len]) text_len++;
+            
+                        uint32_t max_chars = (widget->width - 8) / 8; // 8 пикселей на символ
+                        if (max_chars < 1) max_chars = 1;
+            
+                        // Если текст не помещается, создаём усечённую версию
+                        char display_text[256];
+                        if (text_len <= max_chars) {
+                            // Текст помещается
+                            uint32_t text_x = widget->x + (widget->width - text_len * 8) / 2;
+                            uint32_t text_y = widget->y + (widget->height - 16) / 2;
+                            vesa_draw_text(text_x, text_y, widget->text, text_color, btn_color);
+                        } else {
+                            // Текст не помещается - показываем с троеточием
+                            uint32_t dots_len = 3; // "..."
+                            uint32_t chars_to_show = max_chars - dots_len;
+                            if (chars_to_show < 1) chars_to_show = 1;
+                
+                            // Копируем начало текста
+                            for (uint32_t i = 0; i < chars_to_show && i < 250; i++) {
+                                display_text[i] = widget->text[i];
+                            }
+                            // Добавляем троеточие
+                            display_text[chars_to_show] = '.';
+                            display_text[chars_to_show + 1] = '.';
+                            display_text[chars_to_show + 2] = '.';
+         	            display_text[chars_to_show + 3] = '\0';
+                
+          	            uint32_t display_len = chars_to_show + 3;
+            		    uint32_t text_x = widget->x + (widget->width - display_len * 8) / 2;
+                            uint32_t text_y = widget->y + (widget->height - 16) / 2;
+                            vesa_draw_text(text_x, text_y, display_text, text_color, btn_color);
+                        }
                     }
                 }
                 else if (widget->type == WIDGET_LABEL) {
@@ -866,30 +895,33 @@ void gui_render(void) {
                     if (widget->data) {
                         value = *((uint32_t*)widget->data);
                     }
-                    
+    
+                    // Фон прогресс-бара
                     vesa_draw_rect(widget->x, widget->y, widget->width, widget->height, PROGRESSBAR_BG_COLOR);
+    
+                    // Рамка
                     vesa_draw_rect(widget->x, widget->y, widget->width, 1, 0x808080);
                     vesa_draw_rect(widget->x, widget->y + widget->height - 1, widget->width, 1, 0x808080);
                     vesa_draw_rect(widget->x, widget->y, 1, widget->height, 0x808080);
                     vesa_draw_rect(widget->x + widget->width - 1, widget->y, 1, widget->height, 0x808080);
-                    
-                    uint32_t fill_width = (value * (widget->width - 2)) / 100;
-                    if (fill_width > 0) {
-                        vesa_draw_rect(widget->x + 1, widget->y + 1, fill_width, widget->height - 2, PROGRESSBAR_FILL_COLOR);
-                    }
-                    
-                    if (widget->height >= 16) {
-                        char percent[8];
-                        percent[0] = '0' + (value / 100);
-                        percent[1] = '0' + ((value % 100) / 10);
-                        percent[2] = '0' + (value % 10);
-                        percent[3] = '%';
-                        percent[4] = '\0';
-                        
-                        uint32_t text_x = widget->x + (widget->width - 4*8) / 2;
-                        uint32_t text_y = widget->y + (widget->height - 16) / 2;
-                        vesa_draw_text(text_x, text_y, percent, 0x000000, PROGRESSBAR_BG_COLOR);
-                    }
+
+                    uint32_t fill_width = 0;
+    
+                    // Заливка (без процентов по центру)
+                    if (value > 0 && widget->width > 2) {
+                        uint32_t fill_width = (value * (widget->width - 2)) / 100;
+                        if (fill_width > 0) {
+                            vesa_draw_rect(widget->x + 1, widget->y + 1, fill_width, widget->height - 2, PROGRESSBAR_FILL_COLOR);
+            
+                            // Стильная полоска для 3D эффекта
+                            if (fill_width > 4) {
+                                // Светлая полоска сверху
+                                vesa_draw_rect(widget->x + 1, widget->y + 1, fill_width, 1, 0xA0D0FF);
+                                // Темная полоска снизу
+                                vesa_draw_rect(widget->x + 1, widget->y + widget->height - 2, fill_width, 1, 0x2050A0);
+                            }
+                        }
+   	            }
                 }
                 
                 widget = widget->next;

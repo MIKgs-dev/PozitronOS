@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "kernel/memory.h"
+#include "kernel/multiboot.h"
 
 // Шрифт 8x16 (первые 128 символов ASCII)
 static const uint8_t font_8x16[2048] = {
@@ -522,19 +523,20 @@ void vesa_update_dirty(void) {
         return;
     }
     
-    // ВАЖНО: НЕ трогаем курсор здесь! Курсор управляется отдельно в cursor.c
-    
-    // Копируем только грязные области
+    // Для каждого dirty rectangle
     for (uint32_t i = 0; i < dirty_count; i++) {
         dirty_rect_t* r = &dirty_rects[i];
         
         // Для каждой строки
         for (uint32_t y = r->y; y < r->y + r->h && y < fb.height; y++) {
-            uint32_t* src = &back_buffer[y * fb.width + r->x];
-            uint32_t* dst = &fb.address[y * fb.width + r->x];
-            uint32_t words = r->w;
+            uint8_t* src = (uint8_t*)&back_buffer[y * fb.pitch + r->x * (fb.bpp / 8)];
+            uint8_t* dst = (uint8_t*)&fb.address[y * fb.pitch + r->x * (fb.bpp / 8)];
+            uint32_t bytes = r->w * (fb.bpp / 8);
             
-            fast_copy(dst, src, words);
+            // Копируем байт за байтом для 24-битного режима
+            for (uint32_t b = 0; b < bytes; b++) {
+                dst[b] = src[b];
+            }
         }
     }
     
@@ -590,7 +592,7 @@ uint8_t vesa_get_dirty_rect(uint32_t index, uint32_t* x, uint32_t* y, uint32_t* 
 void vesa_cache_background(void) {
     if (!fb.found || !double_buffer_enabled) return;
     
-    size_t buffer_size = fb.width * fb.height * sizeof(uint32_t);
+    size_t buffer_size = fb.width * fb.height * (fb.bpp / 8);
     background_cache = (uint32_t*)kmalloc(buffer_size);
     
     if (!background_cache) {
@@ -658,11 +660,20 @@ void vesa_free_background_cache(void) {
 // ===== ОСНОВНЫЕ ФУНКЦИИ VESA =====
 
 static int find_vbe_info(void) {
-    serial_puts("[VESA] Scanning for framebuffer...\n");
+    serial_puts("[VESA] Scanning for framebuffer (fallback)...\n");
     
+    // Массив возможных адресов фреймбуфера
     uint32_t test_addresses[] = {0xFD000000, 0xE0000000, 0xB8000000, 0xA0000000};
     
     for(int i = 0; i < 4; i++) {
+        serial_puts("[VESA] Testing address 0x");
+        uint32_t addr = test_addresses[i];
+        char hex[] = "0123456789ABCDEF";
+        for(int j = 28; j >= 0; j -= 4) {
+            if(addr >> j) serial_write(hex[(addr >> j) & 0xF]);
+        }
+        serial_puts("... ");
+        
         volatile uint32_t* test_fb = (volatile uint32_t*)test_addresses[i];
         uint32_t original = test_fb[0];
         test_fb[0] = 0x00AABBCC;
@@ -672,21 +683,20 @@ static int find_vbe_info(void) {
             test_fb[0] = original;
             fb.address = (uint32_t*)test_addresses[i];
             fb.found = 1;
+            
+            // Стандартные значения по умолчанию
             fb.width = 1024;
             fb.height = 768;
             fb.bpp = 32;
             fb.pitch = fb.width * 4;
             
-            serial_puts("[VESA] Found framebuffer at 0x");
-            uint32_t addr = (uint32_t)fb.address;
-            char hex[] = "0123456789ABCDEF";
-            for(int j = 28; j >= 0; j -= 4) {
-                if(addr >> j) serial_write(hex[(addr >> j) & 0xF]);
-            }
-            serial_puts("\n");
+            serial_puts("FOUND (using 1024x768x32 as fallback)\n");
             return 1;
         }
+        serial_puts("NOT FOUND\n");
     }
+    
+    serial_puts("[VESA] No framebuffer found during scan\n");
     return 0;
 }
 
@@ -698,7 +708,7 @@ int vesa_enable_double_buffer(void) {
         return 0;
     }
     
-    size_t buffer_size = fb.width * fb.height * sizeof(uint32_t);
+    size_t buffer_size = fb.width * fb.height * (fb.bpp / 8);
     back_buffer = (uint32_t*)kmalloc(buffer_size);
     
     if (!back_buffer) {
@@ -750,47 +760,124 @@ void vesa_clear_back_buffer(color_t color) {
 
 // ===== ИНИЦИАЛИЗАЦИЯ =====
 
-int vesa_init(void) {
+// Изменяем прототип функции
+int vesa_init(multiboot_info_t* mb_info) {
     serial_puts("[VESA] Initializing...\n");
     
+    // Даем время для инициализации оборудования
     for(int i = 0; i < 1000000; i++) asm volatile("nop");
     
-    if(find_vbe_info()) {
-        serial_puts("[VESA] Framebuffer initialized: ");
-        serial_puts_num(fb.width);
-        serial_puts("x");
-        serial_puts_num(fb.height);
-        serial_puts("x");
-        serial_puts_num(fb.bpp);
-        serial_puts("\n");
+    // Сначала пробуем использовать информацию из Multiboot (если предоставлена)
+    if (mb_info && (mb_info->flags & (1 << 12))) {
+        serial_puts("[VESA] Trying to use Multiboot framebuffer info...\n");
         
-        vesa_fill(0x000000);
+        fb.address = (uint32_t*)(uintptr_t)mb_info->framebuffer_addr;
+        fb.width = mb_info->framebuffer_width;
+        fb.height = mb_info->framebuffer_height;
+        fb.bpp = mb_info->framebuffer_bpp;
+        fb.pitch = mb_info->framebuffer_pitch;
         
-        if (vesa_enable_double_buffer()) {
-            vesa_clear_back_buffer(0x000000);
+        // Проверяем, что адрес валидный
+        if (fb.address) {
+            serial_puts("[VESA] Testing Multiboot framebuffer at 0x");
+            uint32_t addr = (uint32_t)fb.address;
+            char hex[] = "0123456789ABCDEF";
+            for(int j = 28; j >= 0; j -= 4) {
+                if(addr >> j) serial_write(hex[(addr >> j) & 0xF]);
+            }
+            serial_puts("\n");
+            
+            // Тестовый пиксель для проверки доступности
+            volatile uint32_t* test_fb = (volatile uint32_t*)fb.address;
+            uint32_t original = test_fb[0];
+            test_fb[0] = 0x00AABBCC;
+            asm volatile("" ::: "memory");
+            
+            if(test_fb[0] == 0x00AABBCC) {
+                test_fb[0] = original;
+                fb.found = 1;
+                
+                serial_puts("[VESA] Multiboot framebuffer verified: ");
+                serial_puts_num(fb.width);
+                serial_puts("x");
+                serial_puts_num(fb.height);
+                serial_puts("x");
+                serial_puts_num(fb.bpp);
+                serial_puts("\n");
+                serial_puts("[VESA] Pitch: ");
+                serial_puts_num(fb.pitch);
+                serial_puts(" bytes\n");
+                
+                // Переходим к инициализации систем
+                goto init_systems;
+            }
         }
         
-        vesa_cache_background();
-        vesa_init_dirty();
-        
-        // Инициализируем систему курсора (вызовется из main.c)
-        
-        return 1;
+        serial_puts("[VESA] Multiboot framebuffer verification failed, falling back to scan\n");
+    } else {
+        serial_puts("[VESA] No Multiboot framebuffer info available\n");
     }
     
-    serial_puts("[VESA] ERROR: No framebuffer found!\n");
-    return 0;
+    // Если Multiboot не сработал, используем старый метод сканирования
+    if (!find_vbe_info()) {
+        serial_puts("[VESA] ERROR: No framebuffer found!\n");
+        return 0;
+    }
+    
+init_systems:
+    // Общая инициализация (выполняется в любом случае)
+    vesa_fill(0x000000);
+    
+    if (vesa_enable_double_buffer()) {
+        vesa_clear_back_buffer(0x000000);
+    }
+    
+    vesa_cache_background();
+    vesa_init_dirty();
+    
+    serial_puts("[VESA] Framebuffer initialized: ");
+    serial_puts_num(fb.width);
+    serial_puts("x");
+    serial_puts_num(fb.height);
+    serial_puts("x");
+    serial_puts_num(fb.bpp);
+    serial_puts(" (Pitch: ");
+    serial_puts_num(fb.pitch);
+    serial_puts(")\n");
+    
+    return 1;
 }
 
 // ===== ПРИМИТИВЫ РИСОВАНИЯ =====
-
 void vesa_put_pixel(uint32_t x, uint32_t y, color_t color) {
     if(!fb.found || x >= fb.width || y >= fb.height) return;
     
-    if (double_buffer_enabled && back_buffer) {
-        back_buffer[y * fb.width + x] = color;
+    uint32_t* buffer = (double_buffer_enabled && back_buffer) ? back_buffer : fb.address;
+    uint32_t offset;
+    
+    if (fb.bpp == 24) {
+        // 24-битный режим: 3 байта на пиксель
+        offset = y * fb.pitch + x * 3; // pitch уже в байтах!
+        uint8_t* byte_buffer = (uint8_t*)buffer;
+        
+        // Разбиваем color на RGB компоненты
+        byte_buffer[offset] = color & 0xFF;          // Blue
+        byte_buffer[offset + 1] = (color >> 8) & 0xFF;  // Green
+        byte_buffer[offset + 2] = (color >> 16) & 0xFF; // Red
+    } else if (fb.bpp == 32) {
+        // 32-битный режим: 4 байта на пиксель
+        offset = y * (fb.pitch / 4) + x; // pitch в байтах, делим на 4 для uint32_t
+        buffer[offset] = color;
     } else {
-        fb.address[y * fb.width + x] = color;
+        // 16-битный режим (если потребуется)
+        offset = y * (fb.pitch / 2) + x; // pitch в байтах, делим на 2 для uint16_t
+        uint16_t* short_buffer = (uint16_t*)buffer;
+        // Преобразование color в RGB565
+        uint8_t r = (color >> 16) & 0xFF;
+        uint8_t g = (color >> 8) & 0xFF;
+        uint8_t b = color & 0xFF;
+        uint16_t rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+        short_buffer[offset] = rgb565;
     }
 }
 

@@ -1,8 +1,10 @@
 #include "drivers/hid.h"
 #include "drivers/serial.h"
 #include "drivers/usb.h"
+#include "kernel/memory.h"
 #include "core/event.h"
 #include <stddef.h>
+#include "lib/string.h"
 
 // Максимальное количество HID устройств
 #define MAX_HID_DEVICES 8
@@ -45,38 +47,11 @@ static const char keycode_to_ascii_shift[128] = {
     0,   0,   0,   0,   0,   0,   0,   0,    // 0x58-0x5F
 };
 
-// СВОИ РЕАЛИЗАЦИИ mem* функций для HID
-static void hid_memset(void* ptr, uint8_t value, uint32_t size) {
-    uint8_t* p = (uint8_t*)ptr;
-    for (uint32_t i = 0; i < size; i++) {
-        p[i] = value;
-    }
-}
-
-static void hid_memcpy(void* dst, const void* src, uint32_t size) {
-    uint8_t* d = (uint8_t*)dst;
-    const uint8_t* s = (const uint8_t*)src;
-    for (uint32_t i = 0; i < size; i++) {
-        d[i] = s[i];
-    }
-}
-
-static int hid_memcmp(const void* ptr1, const void* ptr2, uint32_t size) {
-    const uint8_t* p1 = (const uint8_t*)ptr1;
-    const uint8_t* p2 = (const uint8_t*)ptr2;
-    for (uint32_t i = 0; i < size; i++) {
-        if (p1[i] != p2[i]) {
-            return p1[i] - p2[i];
-        }
-    }
-    return 0;
-}
-
 // Инициализация HID системы
 void hid_init(void) {
     serial_puts("[HID] Initializing HID subsystem\n");
     
-    hid_memset(hid_devices, 0, sizeof(hid_devices));
+    memset(hid_devices, 0, sizeof(hid_devices));
     hid_device_count = 0;
     keyboard_count = 0;
     mouse_count = 0;
@@ -97,7 +72,7 @@ void hid_init(void) {
         }
         
         hid_device_t* hid_dev = &hid_devices[hid_device_count];
-        hid_memset(hid_dev, 0, sizeof(hid_device_t));
+        memset(hid_dev, 0, sizeof(hid_device_t));
         
         hid_dev->usb_dev = usb_dev;
         hid_dev->enabled = 1;
@@ -154,7 +129,7 @@ void hid_poll(void) {
                 hid_keyboard_report_t* report = (hid_keyboard_report_t*)report_buffer;
                 
                 // Проверяем изменения
-                if (hid_memcmp(&hid_dev->last_keyboard_report, report, sizeof(hid_keyboard_report_t)) != 0) {
+                if (memcmp(&hid_dev->last_keyboard_report, report, sizeof(hid_keyboard_report_t)) != 0) {
                     // Обновляем состояние клавиш
                     uint8_t old_modifiers = hid_dev->last_keyboard_report.modifiers;
                     uint8_t new_modifiers = report->modifiers;
@@ -190,8 +165,8 @@ void hid_poll(void) {
                     // Проверяем обычные клавиши
                     uint8_t old_keys[6];
                     uint8_t new_keys[6];
-                    hid_memcpy(old_keys, hid_dev->last_keyboard_report.keycode, 6);
-                    hid_memcpy(new_keys, report->keycode, 6);
+                    memcpy(old_keys, hid_dev->last_keyboard_report.keycode, 6);
+                    memcpy(new_keys, report->keycode, 6);
                     
                     // Проверяем отпущенные клавиши
                     for (uint8_t j = 0; j < 6; j++) {
@@ -247,7 +222,7 @@ void hid_poll(void) {
                     }
                     
                     // Сохраняем новый отчет
-                    hid_memcpy(&hid_dev->last_keyboard_report, report, sizeof(hid_keyboard_report_t));
+                    memcpy(&hid_dev->last_keyboard_report, report, sizeof(hid_keyboard_report_t));
                 }
             }
             else if (hid_dev->type == 2) {
@@ -255,7 +230,7 @@ void hid_poll(void) {
                 hid_mouse_report_t* report = (hid_mouse_report_t*)report_buffer;
                 
                 // Проверяем изменения
-                if (hid_memcmp(&hid_dev->last_mouse_report, report, sizeof(hid_mouse_report_t)) != 0) {
+                if (memcmp(&hid_dev->last_mouse_report, report, sizeof(hid_mouse_report_t)) != 0) {
                     // Проверяем кнопки
                     uint8_t old_buttons = hid_dev->last_mouse_report.buttons;
                     uint8_t new_buttons = report->buttons;
@@ -304,7 +279,7 @@ void hid_poll(void) {
                     }
                     
                     // Сохраняем новый отчет
-                    hid_memcpy(&hid_dev->last_mouse_report, report, sizeof(hid_mouse_report_t));
+                    memcpy(&hid_dev->last_mouse_report, report, sizeof(hid_mouse_report_t));
                 }
             }
         }
@@ -364,8 +339,8 @@ uint8_t hid_keyboard_get_modifiers(hid_device_t* keyboard) {
 // Очистка буфера клавиатуры
 void hid_keyboard_clear_buffer(hid_device_t* keyboard) {
     if (!keyboard || keyboard->type != 1) return;
-    hid_memset(&keyboard->last_keyboard_report, 0, sizeof(hid_keyboard_report_t));
-    hid_memset(keyboard->key_states, 0, sizeof(keyboard->key_states));
+    memset(&keyboard->last_keyboard_report, 0, sizeof(hid_keyboard_report_t));
+    memset(keyboard->key_states, 0, sizeof(keyboard->key_states));
 }
 
 // Получение координаты X мыши

@@ -1,7 +1,7 @@
 #include "drivers/usb.h"
 #include "drivers/serial.h"
 #include "drivers/ports.h"
-#include "drivers/timer.h"
+#include "kernel/memory.h"
 #include <stddef.h>
 
 // === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
@@ -57,6 +57,22 @@ static const char* usb_speed_to_str(usb_speed_t speed) {
         case USB_SPEED_FULL: return "Full (12Mbps)";
         case USB_SPEED_HIGH: return "High (480Mbps)";
         default: return "Unknown";
+    }
+}
+
+// Задержка с использованием pause
+static void usb_delay_ms(uint32_t ms) {
+    // 1ms примерно = 1000 пауз на процессоре без таймера
+    // Настраиваем под ваш процессор
+    for (volatile uint32_t i = 0; i < ms * 1000; i++) {
+        asm volatile ("pause");
+    }
+}
+
+// Задержка микросекунд
+static void usb_delay_us(uint32_t us) {
+    for (volatile uint32_t i = 0; i < us * 10; i++) {
+        asm volatile ("pause");
     }
 }
 
@@ -193,19 +209,6 @@ void _usb_hid_report_received(usb_device_t* dev, uint8_t* report, uint16_t lengt
     
     if (length > 8) serial_puts(" ...");
     serial_puts("\n");
-    
-    // Если это клавиатура HID
-    if (dev->class == USB_CLASS_HID && 
-        dev->subclass == HID_SUBCLASS_BOOT &&
-        dev->protocol == HID_PROTOCOL_KEYBOARD) {
-        // TODO: Обработка клавиатуры
-    }
-    // Если это мышь HID
-    else if (dev->class == USB_CLASS_HID && 
-             dev->subclass == HID_SUBCLASS_BOOT &&
-             dev->protocol == HID_PROTOCOL_MOUSE) {
-        // TODO: Обработка мыши
-    }
 }
 
 // === УПРАВЛЯЮЩАЯ ТРАНЗАКЦИЯ (Control Transfer) ===
@@ -413,7 +416,7 @@ static int usb_set_address(usb_device_t* dev, uint8_t address) {
         serial_puts(" for device\n");
         
         // Задержка после SET_ADDRESS
-        timer_sleep_ms(10);
+        usb_delay_ms(10);
     }
     
     return result;
@@ -667,7 +670,7 @@ static void enumerate_device(usb_device_t* dev) {
     }
     
     // 4. Задержка для стабилизации
-    timer_sleep_ms(50);
+    usb_delay_ms(50);
     
     // 5. Конфигурируем устройство с новым адресом
     if (!usb_configure_device(dev)) {

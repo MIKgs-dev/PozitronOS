@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "kernel/multiboot.h"
 
 // === Конфигурация ===
 #define USE_ADVANCED_ALLOCATOR 1  // 1 = новый аллокатор, 0 = старый
@@ -40,6 +41,7 @@ typedef struct {
 
 // Инициализация памяти
 void memory_init(void);
+void memory_init_multiboot(multiboot_info_t* mb_info);
 
 // Основные функции
 void* kmalloc(uint32_t size);

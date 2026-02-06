@@ -2,8 +2,9 @@
 #include "drivers/serial.h"
 #include "drivers/ports.h"
 #include "drivers/usb.h"
-#include "drivers/timer.h"
+#include "kernel/memory.h"
 #include <stddef.h>
+#include "lib/string.h"
 
 static uint32_t ohci_base = 0;
 static uint8_t ohci_initialized = 0;
@@ -39,19 +40,16 @@ static ohci_qh_t* control_qh = NULL;
 static uint8_t* setup_buffer = NULL;
 static uint8_t* data_buffer = NULL;
 
-// СВОИ РЕАЛИЗАЦИИ mem* функций для OHCI
-static void ohci_memset(void* ptr, uint8_t value, uint32_t size) {
-    uint8_t* p = (uint8_t*)ptr;
-    for (uint32_t i = 0; i < size; i++) {
-        p[i] = value;
+// Задержка с использованием pause
+static void ohci_delay_ms(uint32_t ms) {
+    for (volatile uint32_t i = 0; i < ms * 1000; i++) {
+        asm volatile ("pause");
     }
 }
 
-static void ohci_memcpy(void* dst, const void* src, uint32_t size) {
-    uint8_t* d = (uint8_t*)dst;
-    const uint8_t* s = (const uint8_t*)src;
-    for (uint32_t i = 0; i < size; i++) {
-        d[i] = s[i];
+static void ohci_delay_us(uint32_t us) {
+    for (volatile uint32_t i = 0; i < us * 10; i++) {
+        asm volatile ("pause");
     }
 }
 
@@ -63,56 +61,73 @@ static void ohci_write_reg(uint32_t reg, uint32_t value) {
     outl(ohci_base + reg, value);
 }
 
-static void ohci_delay_ms(uint32_t ms) {
-    timer_sleep_ms(ms);
-}
-
-// Аллокация памяти для OHCI
-static void* ohci_alloc_align(uint32_t size, uint32_t align) {
-    static uint8_t mem_pool[8192];
-    static uint32_t mem_offset = 0;
-    
-    uint32_t aligned_offset = (mem_offset + align - 1) & ~(align - 1);
-    
-    if (aligned_offset + size > sizeof(mem_pool)) {
-        serial_puts("[OHCI] ERROR: Memory pool exhausted\n");
-        return NULL;
-    }
-    
-    void* ptr = &mem_pool[aligned_offset];
-    mem_offset = aligned_offset + size;
-    
-    // Выравниваем по границе 256 байт для HCCA
-    if (align == 256) {
-        ohci_memset(ptr, 0, size);
-    }
-    
-    return ptr;
-}
-
-// Инициализация структур OHCI
+// Инициализация структур OHCI с использованием аллокатора
 static int ohci_init_structures(void) {
-    // HCCA должен быть выровнен по 256 байт
-    hcca = (ohci_hcca_t*)ohci_alloc_align(sizeof(ohci_hcca_t), 256);
-    control_td = (ohci_td_t*)ohci_alloc_align(sizeof(ohci_td_t) * 4, 16);
-    control_qh = (ohci_qh_t*)ohci_alloc_align(sizeof(ohci_qh_t), 16);
-    setup_buffer = (uint8_t*)ohci_alloc_align(8, 4);
-    data_buffer = (uint8_t*)ohci_alloc_align(USB_MAX_PACKET_SIZE, 4);
+    // Выделяем память для HCCA с выравниванием
+    hcca = (ohci_hcca_t*)kmalloc(sizeof(ohci_hcca_t));
+    if (!hcca) {
+        serial_puts("[OHCI] ERROR: Failed to allocate HCCA\n");
+        return 0;
+    }
     
-    if (!hcca || !control_td || !control_qh || !setup_buffer || !data_buffer) {
-        serial_puts("[OHCI] ERROR: Failed to allocate structures\n");
+    control_td = (ohci_td_t*)kmalloc(sizeof(ohci_td_t) * 4);
+    if (!control_td) {
+        kfree(hcca);
+        serial_puts("[OHCI] ERROR: Failed to allocate TDs\n");
+        return 0;
+    }
+    
+    control_qh = (ohci_qh_t*)kmalloc(sizeof(ohci_qh_t));
+    if (!control_qh) {
+        kfree(hcca);
+        kfree(control_td);
+        serial_puts("[OHCI] ERROR: Failed to allocate QH\n");
+        return 0;
+    }
+    
+    setup_buffer = (uint8_t*)kmalloc(8);
+    if (!setup_buffer) {
+        kfree(hcca);
+        kfree(control_td);
+        kfree(control_qh);
+        serial_puts("[OHCI] ERROR: Failed to allocate setup buffer\n");
+        return 0;
+    }
+    
+    data_buffer = (uint8_t*)kmalloc(USB_MAX_PACKET_SIZE);
+    if (!data_buffer) {
+        kfree(hcca);
+        kfree(control_td);
+        kfree(control_qh);
+        kfree(setup_buffer);
+        serial_puts("[OHCI] ERROR: Failed to allocate data buffer\n");
         return 0;
     }
     
     // Инициализируем HCCA
-    ohci_memset(hcca, 0, sizeof(ohci_hcca_t));
+    memset(hcca, 0, sizeof(ohci_hcca_t));
     
     // Инициализируем Control QH
-    ohci_memset(control_qh, 0, sizeof(ohci_qh_t));
+    memset(control_qh, 0, sizeof(ohci_qh_t));
     control_qh->next_qh = 0x00000001; // Терминируем
     
     serial_puts("[OHCI] Structures initialized\n");
     return 1;
+}
+
+// Освобождение структур
+static void ohci_free_structures(void) {
+    if (hcca) kfree(hcca);
+    if (control_td) kfree(control_td);
+    if (control_qh) kfree(control_qh);
+    if (setup_buffer) kfree(setup_buffer);
+    if (data_buffer) kfree(data_buffer);
+    
+    hcca = NULL;
+    control_td = NULL;
+    control_qh = NULL;
+    setup_buffer = NULL;
+    data_buffer = NULL;
 }
 
 // Создание Setup TD
@@ -122,7 +137,7 @@ static ohci_td_t* create_setup_td(ohci_td_t* next_td, uint8_t* setup_data,
     if (!control_td) return NULL;
     
     ohci_td_t* td = &control_td[0];
-    ohci_memset(td, 0, sizeof(ohci_td_t));
+    memset(td, 0, sizeof(ohci_td_t));
     
     // Flags
     td->flags = (1 << 18); // Дирекция: setup
@@ -142,7 +157,7 @@ static ohci_td_t* create_setup_td(ohci_td_t* next_td, uint8_t* setup_data,
     
     // Копируем setup данные
     if (setup_data) {
-        ohci_memcpy(setup_buffer, setup_data, 8);
+        memcpy(setup_buffer, setup_data, 8);
     }
     
     return td;
@@ -155,7 +170,7 @@ static ohci_td_t* create_data_td(ohci_td_t* next_td, uint8_t* data, uint16_t len
     if (!control_td) return NULL;
     
     ohci_td_t* td = &control_td[1];
-    ohci_memset(td, 0, sizeof(ohci_td_t));
+    memset(td, 0, sizeof(ohci_td_t));
     
     // Flags
     td->flags = (direction << 18); // IN или OUT
@@ -175,7 +190,7 @@ static ohci_td_t* create_data_td(ohci_td_t* next_td, uint8_t* data, uint16_t len
     
     // Копируем данные для OUT
     if (direction == 0 && data && length > 0) {
-        ohci_memcpy(data_buffer, data, length);
+        memcpy(data_buffer, data, length);
     }
     
     return td;
@@ -187,7 +202,7 @@ static ohci_td_t* create_status_td(ohci_td_t* next_td, uint8_t direction,
     if (!control_td) return NULL;
     
     ohci_td_t* td = &control_td[2];
-    ohci_memset(td, 0, sizeof(ohci_td_t));
+    memset(td, 0, sizeof(ohci_td_t));
     
     // Flags
     td->flags = (direction << 18); // IN или OUT
@@ -210,9 +225,9 @@ static ohci_td_t* create_status_td(ohci_td_t* next_td, uint8_t direction,
 
 // Ожидание завершения TD
 static int wait_for_td_completion(ohci_td_t* td, uint32_t timeout_ms) {
-    uint32_t start_ticks = timer_get_ticks();
+    uint32_t start_time = 0;
     
-    while (timer_get_ticks() - start_ticks < timeout_ms) {
+    while (start_time < timeout_ms * 1000) {
         uint32_t condition_code = (td->flags >> 24) & 0x0F;
         
         if (condition_code != 0) {
@@ -226,7 +241,9 @@ static int wait_for_td_completion(ohci_td_t* td, uint32_t timeout_ms) {
                 return -1;
             }
         }
-        ohci_delay_ms(1);
+        
+        start_time++;
+        ohci_delay_us(10);
     }
     
     serial_puts("[OHCI] TD timeout\n");
@@ -330,7 +347,7 @@ int ohci_control_transfer(uint8_t controller_idx,
         
         // Если это IN transfer, копируем данные
         if ((bmRequestType & 0x80) && data) {
-            ohci_memcpy(data, data_buffer, wLength);
+            memcpy(data, data_buffer, wLength);
         }
         
         // Переключаем data toggle
@@ -389,47 +406,57 @@ int ohci_interrupt_transfer(uint8_t controller_idx,
         return -1;
     }
     
-    // Создаем TD
-    ohci_td_t td;
-    ohci_memset(&td, 0, sizeof(ohci_td_t));
+    // Используем временные буферы
+    ohci_td_t* td = (ohci_td_t*)kmalloc(sizeof(ohci_td_t));
+    ohci_qh_t* qh = (ohci_qh_t*)kmalloc(sizeof(ohci_qh_t));
+    uint8_t* temp_buffer = (uint8_t*)kmalloc(length);
+    
+    if (!td || !qh || !temp_buffer) {
+        if (td) kfree(td);
+        if (qh) kfree(qh);
+        if (temp_buffer) kfree(temp_buffer);
+        serial_puts("[OHCI] ERROR: Out of memory for transfer\n");
+        return -1;
+    }
+    
+    memset(td, 0, sizeof(ohci_td_t));
+    memset(qh, 0, sizeof(ohci_qh_t));
     
     // Flags
-    td.flags = ((direction == USB_ENDPOINT_IN ? 1 : 0) << 18);
-    td.flags |= (0 << 19); // Задержка
-    td.flags |= (3 << 21); // 3 ошибки
-    td.flags |= (0 << 24); // Condition Code = Not Accessed
-    td.flags |= (ep->toggle << 26); // Data Toggle
+    td->flags = ((direction == USB_ENDPOINT_IN ? 1 : 0) << 18);
+    td->flags |= (0 << 19); // Задержка
+    td->flags |= (3 << 21); // 3 ошибки
+    td->flags |= (0 << 24); // Condition Code = Not Accessed
+    td->flags |= (ep->toggle << 26); // Data Toggle
     
     // Buffer End
-    td.td_buffer_end = (uint32_t)data_buffer + length - 1;
+    td->td_buffer_end = (uint32_t)temp_buffer + length - 1;
     
     // Next TD
-    td.next_td = 0x00000001; // Терминируем
+    td->next_td = 0x00000001; // Терминируем
     
     // Buffer Start
-    td.buffer_start = (uint32_t)data_buffer;
+    td->buffer_start = (uint32_t)temp_buffer;
     
     // Копируем данные для OUT
     if (direction == USB_ENDPOINT_OUT && length > 0) {
-        ohci_memcpy(data_buffer, buffer, length);
+        memcpy(temp_buffer, buffer, length);
     }
     
-    // Создаем временный QH
-    ohci_qh_t qh;
-    ohci_memset(&qh, 0, sizeof(ohci_qh_t));
-    qh.head_td = (uint32_t)&td;
-    qh.tail_td = (uint32_t)&td;
-    qh.next_qh = 0x00000001;
+    // Инициализируем QH
+    qh->head_td = (uint32_t)td;
+    qh->tail_td = (uint32_t)td;
+    qh->next_qh = 0x00000001;
     
     // Запускаем передачу
-    ohci_write_reg(OHCI_HCCONTROLHEADED, (uint32_t)&qh);
+    ohci_write_reg(OHCI_HCCONTROLHEADED, (uint32_t)qh);
     
     // Ждем завершения
-    uint32_t start_ticks = timer_get_ticks();
+    uint32_t start_time = 0;
     int result = -1;
     
-    while (timer_get_ticks() - start_ticks < timeout_ms) {
-        uint32_t condition_code = (td.flags >> 24) & 0x0F;
+    while (start_time < timeout_ms * 1000) {
+        uint32_t condition_code = (td->flags >> 24) & 0x0F;
         
         if (condition_code != 0) {
             if (condition_code == 1) {
@@ -438,7 +465,7 @@ int ohci_interrupt_transfer(uint8_t controller_idx,
                 
                 // Копируем данные для IN
                 if (direction == USB_ENDPOINT_IN && length > 0) {
-                    ohci_memcpy(buffer, data_buffer, length);
+                    memcpy(buffer, temp_buffer, length);
                 }
                 
                 // Переключаем data toggle
@@ -448,8 +475,15 @@ int ohci_interrupt_transfer(uint8_t controller_idx,
             }
             break;
         }
-        ohci_delay_ms(1);
+        
+        start_time++;
+        ohci_delay_us(10);
     }
+    
+    // Освобождаем временные буферы
+    kfree(td);
+    kfree(qh);
+    kfree(temp_buffer);
     
     if (result < 0) {
         serial_puts("[OHCI] Interrupt transfer timeout\n");
@@ -467,6 +501,11 @@ void ohci_init(uint32_t base) {
     ohci_base = base;
     
     // 0. Проверим доступность контроллера
+    if (base == 0 || base == 0xFFFFFFFF) {
+        serial_puts("[OHCI] ERROR: Invalid base address\n");
+        return;
+    }
+    
     uint32_t test = ohci_read_reg(OHCI_HCREVISION);
     serial_puts("[OHCI] Revision: 0x");
     serial_puts_num_hex(test);
@@ -501,11 +540,12 @@ void ohci_init(uint32_t base) {
     uint32_t timeout = 10000;
     
     while (timeout-- && (ohci_read_reg(OHCI_HCCONTROL) & (1 << 0))) {
-        ohci_delay_ms(1);
+        ohci_delay_us(100);
     }
     
     if (timeout == 0) {
         serial_puts("[OHCI] ERROR: Reset timeout! Skipping OHCI.\n");
+        ohci_free_structures();
         return;
     }
     
@@ -568,6 +608,7 @@ void ohci_init(uint32_t base) {
         serial_puts("[OHCI] Initialization SUCCESSFUL\n");
     } else {
         serial_puts("[OHCI] ERROR: Controller not operational\n");
+        ohci_free_structures();
     }
 }
 
