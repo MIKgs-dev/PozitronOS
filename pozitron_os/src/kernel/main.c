@@ -18,6 +18,7 @@
 #include "drivers/usb.h"
 #include "drivers/hid.h"
 #include "kernel/multiboot_util.h"
+#include "kernel/logo.h"
 #include <stddef.h>
 
 static uint8_t system_running = 1;
@@ -516,6 +517,16 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     keyboard_init();
     memory_init();
     vga_puts("[ OK ] MEMORU ALLOCATION SYSTEM OK\n");
+
+    if(!vesa_init(mb_info)) {
+        vga_puts("[ERROR] VBE/VESA INITIALISATION FAILED\n");
+    } else {
+        vga_puts("[ OK ] VBE/VESA OK\n");
+    }
+    vesa_enable_double_buffer();
+    show_boot_logo();
+    for (volatile int i = 0; i < 15000000; i++);
+
     cmos_init();
     vga_puts("[ OK ] CMOS RTC OK\n");
 
@@ -537,16 +548,16 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     vga_puts("[ OK ] HID OK\n");
     
     // Графика
-    if(!vesa_init(mb_info)) {
-        vga_puts("[ERROR] VBE/VESA INITIALISATION FAILED\n");
-    } else {
-        vga_puts("[ OK ] VBE/VESA OK\n");
-    }
+    //if(!vesa_init(mb_info)) {
+        //vga_puts("[ERROR] VBE/VESA INITIALISATION FAILED\n");
+    //} else {
+        //vga_puts("[ OK ] VBE/VESA OK\n");
+    //}
     
     uint32_t screen_width = vesa_get_width();
     uint32_t screen_height = vesa_get_height();
     
-    vesa_enable_double_buffer();
+    //vesa_enable_double_buffer();
     
     // Создаём кэшированный фон
     vesa_cache_background();

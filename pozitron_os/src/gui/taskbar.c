@@ -109,82 +109,84 @@ static uint32_t calculate_visible_button_count(void) {
 
 // Функция для обновления времени из RTC
 static void update_time_from_rtc(void) {
-    static uint32_t last_rtc_check = 0;
-    static uint8_t initialized = 0;
-    static uint8_t last_second = 255; // Значение, которое заведомо не совпадет
+    static uint32_t last_update_ticks = 0;
+    static uint8_t last_second = 255;
     
     uint32_t current_ticks = timer_get_ticks();
     
     // === ИСПРАВЛЕННАЯ ВЕРСИЯ ===
-    // Обновляем каждые 50 тиков (0.5 секунды) или при изменении секунды
-    if (!initialized || (current_ticks - last_rtc_check) >= 50) {
+    // Обновляем каждые 10 тиков (100ms) ИЛИ при изменении секунды
+    if ((current_ticks - last_update_ticks) >= 10) {  // Каждые 100ms
         rtc_datetime_t datetime;
         
-        cmos_read_datetime(&datetime);
+        // Считываем время несколько раз для стабильности
+        uint8_t retry_count = 3;
+        uint8_t seconds_array[3];
         
-        // 1. Обновляем только если изменилась секунда
-        if (datetime.seconds != last_second || !initialized) {
-            last_second = datetime.seconds;
+        for (uint8_t i = 0; i < retry_count; i++) {
+            cmos_read_datetime(&datetime);
+            seconds_array[i] = datetime.seconds;
             
-            // Для таскбара: HH:MM (5 символов)
-            clock_text[0] = '0' + (datetime.hours / 10);
-            clock_text[1] = '0' + (datetime.hours % 10);
-            clock_text[2] = ':';
-            clock_text[3] = '0' + (datetime.minutes / 10);
-            clock_text[4] = '0' + (datetime.minutes % 10);
-            clock_text[5] = '\0';
-            
-            // Для окна времени: HH:MM:SS (8 символов)
-            clock_text_full[0] = '0' + (datetime.hours / 10);
-            clock_text_full[1] = '0' + (datetime.hours % 10);
-            clock_text_full[2] = ':';
-            clock_text_full[3] = '0' + (datetime.minutes / 10);
-            clock_text_full[4] = '0' + (datetime.minutes % 10);
-            clock_text_full[5] = ':';
-            clock_text_full[6] = '0' + (datetime.seconds / 10);
-            clock_text_full[7] = '0' + (datetime.seconds % 10);
-            clock_text_full[8] = '\0';
-            
-            format_date_string_full(datetime.day, datetime.month, datetime.year, date_text);
-            
-            // Помечаем область часов в таскбаре как dirty
-            vesa_mark_dirty(clock_button_x, clock_button_y, 
-                           clock_button_width, TASKBAR_BUTTON_HEIGHT);
+            // Если секунды не меняются в течение 3 чтений - данные стабильны
+            if (i >= 1 && seconds_array[i] == seconds_array[i-1]) {
+                break;
+            }
         }
         
-        last_rtc_check = current_ticks;
-        initialized = 1;
+        // Обновляем ВСЕГДА при каждом вызове (но проверяем изменение секунды для логов)
+        uint8_t current_second = datetime.seconds;
+        
+        if (current_second != last_second) {
+            last_second = current_second;
+            // Логируем только при изменении секунды
+            serial_puts("[TASKBAR] Time updated: ");
+            serial_puts_num(datetime.hours);
+            serial_puts(":");
+            serial_puts_num(datetime.minutes);
+            serial_puts(":");
+            serial_puts_num(datetime.seconds);
+            serial_puts("\n");
+        }
+        
+        // Обновляем текст времени для таскбара (HH:MM)
+        clock_text[0] = '0' + (datetime.hours / 10);
+        clock_text[1] = '0' + (datetime.hours % 10);
+        clock_text[2] = ':';
+        clock_text[3] = '0' + (datetime.minutes / 10);
+        clock_text[4] = '0' + (datetime.minutes % 10);
+        clock_text[5] = '\0';
+        
+        // Для окна времени: HH:MM:SS
+        clock_text_full[0] = '0' + (datetime.hours / 10);
+        clock_text_full[1] = '0' + (datetime.hours % 10);
+        clock_text_full[2] = ':';
+        clock_text_full[3] = '0' + (datetime.minutes / 10);
+        clock_text_full[4] = '0' + (datetime.minutes % 10);
+        clock_text_full[5] = ':';
+        clock_text_full[6] = '0' + (datetime.seconds / 10);
+        clock_text_full[7] = '0' + (datetime.seconds % 10);
+        clock_text_full[8] = '\0';
+        
+        // Обновляем дату
+        format_date_string_full(datetime.day, datetime.month, datetime.year, date_text);
+        
+        // Помечаем область часов в таскбаре как dirty
+        vesa_mark_dirty(clock_button_x, clock_button_y, 
+                       clock_button_width, TASKBAR_BUTTON_HEIGHT);
+        
+        last_update_ticks = current_ticks;
     }
 }
 
 static void update_date_menu_time(void) {
-    static uint32_t last_second_update = 0;
-    static Widget* time_label_widget = NULL;
-    
     // Обновляем только если окно открыто
     if (!date_menu_visible || !date_menu_window) return;
     
-    // Находим лейбл времени один раз
-    if (!time_label_widget) {
-        Widget* widget = date_menu_window->first_widget;
-        while (widget) {
-            if (widget->type == WIDGET_LABEL) {
-                // Ищем лейбл с временем по содержимому
-                if (widget->text && widget->text[2] == ':') { // Проверяем формат HH:MM:SS
-                    time_label_widget = widget;
-                    break;
-                }
-            }
-            widget = widget->next;
-        }
-    }
-    
-    if (!time_label_widget) return;
-    
+    static uint32_t last_update = 0;
     uint32_t current_ticks = timer_get_ticks();
     
-    // === ИСПРАВЛЕНИЕ: Обновляем каждые 10 тиков (100ms) ===
-    if ((current_ticks - last_second_update) >= 10) {
+    // Обновляем каждые 5 тиков (50ms) для плавности
+    if ((current_ticks - last_update) >= 5) {
         rtc_datetime_t datetime;
         cmos_read_datetime(&datetime);
         
@@ -200,19 +202,58 @@ static void update_date_menu_time(void) {
         new_time[7] = '0' + (datetime.seconds % 10);
         new_time[8] = '\0';
         
-        // Сравниваем с текущим текстом, обновляем только если изменилось
-        if (!time_label_widget->text || 
-            strncmp(time_label_widget->text, new_time, 8) != 0) {
-            wg_set_text(time_label_widget, new_time);
-            time_label_widget->needs_redraw = 1;
+        // Находим и обновляем все виджеты времени в окне
+        Widget* widget = date_menu_window->first_widget;
+        uint8_t updated = 0;
+        
+        while (widget) {
+            if (widget->type == WIDGET_LABEL && widget->text) {
+                // Проверяем формат HH:MM:SS (длина 8 символов)
+                uint8_t is_time_widget = 0;
+                if (widget->text[2] == ':' && widget->text[5] == ':' && 
+                    gui_strlen(widget->text) == 8) {
+                    is_time_widget = 1;
+                }
+                
+                // Также проверяем по содержимому userdata
+                if (!is_time_widget && widget->userdata) {
+                    char* stored = (char*)widget->userdata;
+                    if (stored[2] == ':' && stored[5] == ':') {
+                        is_time_widget = 1;
+                    }
+                }
+                
+                if (is_time_widget) {
+                    // Обновляем текст
+                    if (widget->text) {
+                        kfree(widget->text);
+                    }
+                    widget->text = (char*)kmalloc(9);
+                    if (widget->text) {
+                        gui_strncpy(widget->text, new_time, 9);
+                    }
+                    
+                    // Обновляем userdata
+                    if (widget->userdata) {
+                        char* stored = (char*)widget->userdata;
+                        gui_strncpy(stored, new_time, 9);
+                    }
+                    
+                    widget->needs_redraw = 1;
+                    updated = 1;
+                }
+            }
+            widget = widget->next;
+        }
+        
+        if (updated) {
             date_menu_window->needs_redraw = 1;
-            
             // Помечаем область окна как dirty
             vesa_mark_dirty(date_menu_window->x, date_menu_window->y,
                           date_menu_window->width, date_menu_window->height);
         }
         
-        last_second_update = current_ticks;
+        last_update = current_ticks;
     }
 }
 

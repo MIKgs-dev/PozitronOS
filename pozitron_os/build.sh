@@ -18,6 +18,7 @@ CFLAGS="-m32 -ffreestanding -O1 -Wall -I./include"
 gcc $CFLAGS -c src/kernel/main.c -o build/main.o
 gcc $CFLAGS -c src/kernel/memory.c -o build/memory.o
 gcc $CFLAGS -c src/kernel/multiboot.c -o build/multiboot.o
+gcc $CFLAGS -c src/kernel/logo.c -o build/logo.o
 
 # Драйверы
 gcc $CFLAGS -c src/drivers/serial.c -o build/serial.o
@@ -61,6 +62,7 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/main.o \
     build/memory.o \
     build/multiboot.o \
+    build/logo.o \
     build/gdt.o \
     build/gdt_asm.o \
     build/idt.o \
