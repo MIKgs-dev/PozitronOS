@@ -18,7 +18,7 @@ void timer_wait(uint32_t ticks);
 uint32_t timer_get_ticks(void);
 void timer_handler(registers_t* regs);
 
-// Добавляем новую функцию
 void timer_sleep_ms(uint32_t milliseconds);
+void timer_sleep_us(uint32_t microseconds);
 
 #endif

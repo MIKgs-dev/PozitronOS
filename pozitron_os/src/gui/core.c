@@ -655,6 +655,15 @@ void gui_render(void) {
         
         return;
     }
+
+    // ===== РИСУЕМ РАБОЧИЙ СТОЛ =====
+    //if (vesa_is_background_cached()) {
+        // Восстанавливаем кэшированный фон
+        //vesa_restore_background_dirty();
+    //} else {
+        // Если нет кэша - заливаем серым
+        //vesa_draw_rect(0, 0, get_screen_width(), get_screen_height() - TASKBAR_HEIGHT, 0xC0C0C0);
+    //}
     
     // Проверяем, есть ли видимые окна
     uint8_t has_visible_windows = 0;

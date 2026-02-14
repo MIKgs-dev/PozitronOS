@@ -96,10 +96,13 @@ void vesa_draw_gradient(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 // ===== DOUBLE BUFFERING =====
 int vesa_enable_double_buffer(void);
 void vesa_disable_double_buffer(void);
+uint8_t vesa_is_double_buffer_enabled(void);
+
+// ВНИМАНИЕ: Эти функции возвращают void*!
+// НЕ КАСТУЙТЕ В uint32_t* без проверки bpp!
+void* vesa_get_back_buffer(void);
 void vesa_swap_buffers(void);
 void vesa_clear_back_buffer(color_t color);
-uint8_t vesa_is_double_buffer_enabled(void);
-uint32_t* vesa_get_back_buffer(void);
 
 // ===== DIRTY RECTANGLES =====
 #define MAX_DIRTY_RECTS 32

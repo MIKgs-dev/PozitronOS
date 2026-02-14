@@ -10,16 +10,17 @@
 #include "core/isr.h"
 #include "core/event.h"
 #include "drivers/vesa.h"
+#include "drivers/ata.h"
 #include "kernel/memory.h"
 #include "gui/gui.h"
 #include "hw/scanner.h"
 #include "drivers/power.h"
-#include "drivers/ata.h"
-#include "drivers/usb.h"
-#include "drivers/hid.h"
+#include "gui/shutdown.h"
 #include "kernel/multiboot_util.h"
 #include "kernel/logo.h"
 #include <stddef.h>
+#include "lib/string.h"
+#include "fs/fat32.h"
 
 static uint8_t system_running = 1;
 
@@ -266,40 +267,6 @@ static void create_demo_ui(void) {
         serial_puts("[DEMO] Test windows created successfully\n");
         serial_puts("[DEMO] Try maximizing both windows to see the difference!\n");
     }
-    
-    // Дополнительное окно для проверки
-    Window* demo3 = wm_create_window("Mixed Controls Demo", 350, 250, 450, 300,
-                                    WINDOW_CLOSABLE | WINDOW_MOVABLE | 
-                                    WINDOW_HAS_TITLE | WINDOW_MINIMIZABLE |
-                                    WINDOW_MAXIMIZABLE);
-    
-    if (demo3) {
-        // Смешанное использование
-        
-        // Относительные координаты
-        wg_create_label_rel(demo3, "Mixed controls demo:", 0.05f, 0.1f);
-        wg_create_label_rel(demo3, "Some widgets use relative coords", 0.1f, 0.16f);
-        wg_create_label_rel(demo3, "Others use absolute coords", 0.1f, 0.21f);
-        
-        // Относительные
-        Widget* cb_rel = wg_create_checkbox_rel(demo3, "Relative checkbox", 
-                                               0.1f, 0.28f, 1);
-        if (cb_rel) {
-            wg_set_callback_ex(cb_rel, checkbox_toggled_callback, NULL);
-        }
-        
-        // Абсолютные
-        Widget* cb_abs = wg_create_checkbox(demo3, "Absolute checkbox", 
-                                           250, 100, 0);
-        if (cb_abs) {
-            wg_set_callback_ex(cb_abs, checkbox_toggled_callback, NULL);
-        }
-        
-        // Тестовая кнопка для максимизации
-        Widget* test_btn = wg_create_button_rel(demo3, "Test Maximize",
-                                               0.6f, 0.4f, 0.3f, 0.1f,
-                                               test_maximize_callback, demo3);
-    }
 }
 
 // ============ ОБРАБОТЧИК КЛАВИАТУРЫ ============
@@ -361,121 +328,12 @@ static void handle_keyboard_events(event_t* event) {
                 }
                 break;
                 
-            case 0x3C: // F2 - информация
-                wm_dump_info();
-                break;
-                
             case 0x01: // ESC - закрыть фокусное окно
                 if (gui_state.focused_window) {
                     wm_close_window(gui_state.focused_window);
                 }
                 break;
-                
-            case 0x57: // F11 - переключение максимизации
-                if (gui_state.focused_window && 
-                    gui_state.focused_window->maximizable) {
-                    if (gui_state.focused_window->maximized) {
-                        wm_restore_window(gui_state.focused_window);
-                        serial_puts("[KEY] F11: Window restored\n");
-                    } else {
-                        wm_maximize_window(gui_state.focused_window);
-                        serial_puts("[KEY] F11: Window maximized\n");
-                    }
-                } else if (gui_state.focused_window) {
-                    serial_puts("[KEY] F11: Window not maximizable\n");
-                }
-                break;
-                
-            case 0x3D: // F3 - создать окно ТОЛЬКО с относительными координатами
-                {
-                    static uint32_t rel_counter = 0;
-                    rel_counter++;
-                    
-                    char title[64];
-                    char* ptr = title;
-                    
-                    const char* prefix = "Rel Window ";
-                    while (*prefix) *ptr++ = *prefix++;
-                    
-                    uint32_t n = rel_counter;
-                    if (n == 0) *ptr++ = '0';
-                    while (n > 0) {
-                        *ptr++ = '0' + (n % 10);
-                        n /= 10;
-                    }
-                    *ptr = '\0';
-                    
-                    // Переворачиваем цифры
-                    char* start = title + 11;
-                    char* end = ptr - 1;
-                    while (start < end) {
-                        char temp = *start;
-                        *start = *end;
-                        *end = temp;
-                        start++;
-                        end--;
-                    }
-                    
-                    // Создаем ТОЛЬКО относительное окно
-                    Window* win = create_test_window(title,
-                                                  150 + (rel_counter * 40) % 400,
-                                                  120 + (rel_counter * 30) % 250,
-                                                  380, 320,
-                                                  1); // Всегда относительные
-                    
-                    if (win) {
-                        serial_puts("[KEY] F3: Created relative coordinate window: ");
-                        serial_puts(title);
-                        serial_puts("\n");
-                    }
-                }
-                break;
-                
-            case 0x3E: // F4 - создать окно ТОЛЬКО с абсолютными координатами
-                {
-                    static uint32_t abs_counter = 0;
-                    abs_counter++;
-                    
-                    char title[64];
-                    char* ptr = title;
-                    
-                    const char* prefix = "Abs Window ";
-                    while (*prefix) *ptr++ = *prefix++;
-                    
-                    uint32_t n = abs_counter;
-                    if (n == 0) *ptr++ = '0';
-                    while (n > 0) {
-                        *ptr++ = '0' + (n % 10);
-                        n /= 10;
-                    }
-                    *ptr = '\0';
-                    
-                    // Переворачиваем цифры
-                    char* start = title + 11;
-                    char* end = ptr - 1;
-                    while (start < end) {
-                        char temp = *start;
-                        *start = *end;
-                        *end = temp;
-                        start++;
-                        end--;
-                    }
-                    
-                    // Создаем ТОЛЬКО абсолютное окно
-                    Window* win = create_test_window(title,
-                                                  200 + (abs_counter * 40) % 400,
-                                                  180 + (abs_counter * 30) % 250,
-                                                  380, 320,
-                                                  0); // Всегда абсолютные
-                    
-                    if (win) {
-                        serial_puts("[KEY] F4: Created absolute coordinate window: ");
-                        serial_puts(title);
-                        serial_puts("\n");
-                    }
-                }
-                break;
-                
+
             case 0x2A: // LSHIFT
             case 0x36: // RSHIFT
                 break;
@@ -501,7 +359,7 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     serial_init();
     vga_init();
     vga_puts("\n");
-    
+
     gdt_init();
     vga_puts("[ OK ] GDT OK\n");
     idt_init();
@@ -511,12 +369,14 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     isr_init();
     vga_puts("[ OK ] ISR OK\n");
     asm volatile("sti");
-    
+
     timer_init(100);
     vga_puts("[ OK ] TIMER OK\n");
     keyboard_init();
     memory_init();
-    vga_puts("[ OK ] MEMORU ALLOCATION SYSTEM OK\n");
+    print_memory_map();
+    memory_dump();
+    vga_puts("[ OK ] MEMORY ALLOCATION SYSTEM OK\n");
 
     if(!vesa_init(mb_info)) {
         vga_puts("[ERROR] VBE/VESA INITIALISATION FAILED\n");
@@ -524,116 +384,107 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
         vga_puts("[ OK ] VBE/VESA OK\n");
     }
     vesa_enable_double_buffer();
+
+    // ===== ПОКАЗЫВАЕМ ЛОГОТИП (ТОЛЬКО FADE-IN) =====
     show_boot_logo();
-    for (volatile int i = 0; i < 15000000; i++);
+
+    // ===== ТЕПЕРЬ ИНИЦИАЛИЗИРУЕМ ВСЁ ОСТАЛЬНОЕ, ОБНОВЛЯЯ ПРОГРЕСС-БАР =====
+    boot_progress = 5;
+    update_boot_progress();
+
+    serial_puts("[INFO] INITIALIZING ATA DRIVER\n");
+    ata_enhanced_init();
+    boot_progress = 15;
+    update_boot_progress();
 
     cmos_init();
     vga_puts("[ OK ] CMOS RTC OK\n");
+    boot_progress = 25;
+    update_boot_progress();
 
     scanner_init();
-    vga_puts("[INFO] SCANNING HARWARE START\n");
+    vga_puts("[INFO] SCANNING HARDWARE START\n");
     scanner_scan_all();
     scanner_dump_all();
-    vga_puts("[ OK ] SCANNING HARWARE FINISH\n");
+    vga_puts("[ OK ] SCANNING HARDWARE FINISH\n");
 
-    ata_init();
-    vga_puts("[INFO] SCANNING ATA DISKS START\n");
-    ata_scan();
+    boot_progress = 60;
+    update_boot_progress();
 
-    // USB ИНИЦИАЛИЗАЦИЯ
-    usb_init();
-    vga_puts("[ OK ] USB OK\n");
-
-    hid_init();
-    vga_puts("[ OK ] HID OK\n");
-    
     // Графика
-    //if(!vesa_init(mb_info)) {
-        //vga_puts("[ERROR] VBE/VESA INITIALISATION FAILED\n");
-    //} else {
-        //vga_puts("[ OK ] VBE/VESA OK\n");
-    //}
-    
     uint32_t screen_width = vesa_get_width();
     uint32_t screen_height = vesa_get_height();
-    
-    //vesa_enable_double_buffer();
-    
-    // Создаём кэшированный фон
+
     vesa_cache_background();
     vesa_init_dirty();
-    
-    // Помечаем ВЕСЬ экран как dirty
     vesa_mark_dirty_all();
-    
     vesa_cursor_init();
     vesa_cursor_set_visible(1);
-    
+    boot_progress = 70;
+    update_boot_progress();
+
     mouse_init();
+    boot_progress = 90;
+    update_boot_progress();
+
     event_init();
     vga_puts("[ OK ] EVENT SYSTEM OK\n");
-    
-    // Восстанавливаем фон
+
+    boot_progress = 100;
+    update_boot_progress();
+    fade_out_boot_logo();
+
     if (vesa_is_background_cached()) {
         vesa_restore_background();
     }
-    
+
     vga_puts("[INFO] STARTUP GUI ENVIRONMENT\n");
     gui_init(screen_width, screen_height);
     taskbar_init();
     //create_demo_ui();
     vga_puts("[ OK ] GUI ENVIRONMENT OK\n");
-    
+
     // Информация в serial
-    serial_puts("\n SYSTEM READY \n");
+    serial_puts("\n=== SYSTEM READY ===\n");
     vga_puts("[INFO] SYSTEMS READY\n");
-    
+
     // Первый рендер
     gui_render();
     vesa_cursor_update();
-    
     if (vesa_is_double_buffer_enabled()) {
         vesa_swap_buffers();
     }
-    
-    serial_puts("\n=== SYSTEM READY ===\n");
-    
+
     // Главный цикл
     while(system_running) {
         asm volatile("hlt");
-    
+
         event_t event;
         while (event_poll(&event)) {
             gui_handle_event(&event);
             handle_keyboard_events(&event);
         }
 
-        // USB опрос
-        usb_poll();
-        
-        // HID опрос (обработка клавиатур/мышей)
-        hid_poll();
-    
         // 1. Сначала скрываем курсор
         vesa_hide_cursor();
-    
+
         // 2. Обновляем анимацию затемнения
         if (is_shutdown_mode_active()) {
             update_shutdown_animation();
         }
-    
+
         // 3. Восстанавливаем фон
         if (vesa_is_background_cached()) {
             vesa_restore_background_dirty();
         }
-    
+
         // 4. Рендерим GUI
         gui_render();
-    
+
         // 5. ПОКАЗЫВАЕМ КУРСОР ВСЕГДА
         vesa_show_cursor();
         vesa_cursor_update();
-    
+
         // 6. Обновляем экран
         if (vesa_is_double_buffer_enabled()) {
             vesa_swap_buffers();

@@ -62,9 +62,20 @@ void timer_wait(uint32_t ticks) {
 
 // Задержка в миллисекундах
 void timer_sleep_ms(uint32_t milliseconds) {
-    // 100Hz таймер = 10ms на тик
-    uint32_t ticks_to_wait = milliseconds / 10;
-    if (ticks_to_wait == 0) ticks_to_wait = 1;
-    
-    timer_wait(ticks_to_wait);
+    uint32_t ticks = milliseconds / 10;
+    if (ticks < 1) ticks = 1;
+    uint32_t start = timer_get_ticks();
+    while (timer_get_ticks() - start < ticks) {
+        asm volatile("pause");
+    }
+}
+
+void timer_sleep_us(uint32_t microseconds) {
+    /* Грубо, но для EHCI пойдёт */
+    uint32_t ticks = microseconds / 10000;
+    if (ticks < 1) ticks = 1;
+    uint32_t start = timer_get_ticks();
+    while (timer_get_ticks() - start < ticks) {
+        asm volatile("pause");
+    }
 }

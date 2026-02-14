@@ -3,22 +3,22 @@
 
 #include <stdint.h>
 
-// Размер логотипа
 #define LOGO_WIDTH 256
 #define LOGO_HEIGHT 256
+#define LOGO_COLOR 0x3F47CC
 
-// Цвет логотипа
-#define LOGO_COLOR 0x3F47CC  // Синий PozitronOS
+#define BOOT_PHASE_FADE_IN   0
+#define BOOT_PHASE_FILLING   1
+#define BOOT_PHASE_FADE_OUT  2
 
-// Настройки анимации
-#define STRETCH_X 1.25f          // Растяжение по ширине
-#define DISPLAY_TIME 20000       // Время показа (20 секунд в мс)
-#define FADE_STEPS 30            // Шагов анимации
-#define FADE_DELAY 10000         // Задержка между шагами (мкс)
+extern volatile uint8_t boot_phase;
+extern volatile uint8_t boot_progress;
 
-// Объявления функций
 void show_boot_logo(void);
 void draw_logo(uint32_t x, uint32_t y);
 void draw_test_logo(uint32_t x, uint32_t y);
+void draw_boot_progress_bar(uint32_t x, uint32_t y, uint8_t percent);
+void update_boot_progress(void);
+void fade_out_boot_logo(void);
 
 #endif

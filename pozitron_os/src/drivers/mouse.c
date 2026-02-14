@@ -139,7 +139,6 @@ void mouse_handler(registers_t* regs) {
             // ВАЖНО: Используем vesa_set_cursor_pos, которая
             // автоматически скрывает старый курсор и показывает новый
             vesa_set_cursor_pos(mouse.public.x, mouse.public.y);
-            vesa_mark_dirty(mouse.public.x, mouse.public.y, 16, 16);
             
             // Сохраняем дельты
             mouse.public.dx = dx;

@@ -33,11 +33,8 @@ gcc $CFLAGS -c src/drivers/cursor.c -o build/cursor.o
 gcc $CFLAGS -c src/drivers/cmos.c -o build/cmos.o
 gcc $CFLAGS -c src/drivers/power.c -o build/power.o
 gcc $CFLAGS -c src/drivers/ata.c -o build/ata.o
-gcc $CFLAGS -c src/drivers/usb.c -o build/usb.o
-gcc $CFLAGS -c src/drivers/uhci.c -o build/uhci.o
-gcc $CFLAGS -c src/drivers/ehci.c -o build/ehci.o
-gcc $CFLAGS -c src/drivers/ohci.c -o build/ohci.o
-gcc $CFLAGS -c src/drivers/hid.c -o build/hid.o
+gcc $CFLAGS -c src/hw/scanner.c -o build/scanner.o
+gcc $CFLAGS -c src/drivers/pci.c -o build/pci.o
 
 # Система
 gcc $CFLAGS -c src/core/event.c -o build/event.o
@@ -52,9 +49,11 @@ gcc $CFLAGS -c src/gui/wget.c -o build/wget.o
 gcc $CFLAGS -c src/gui/taskbar.c -o build/taskbar.o
 gcc $CFLAGS -c src/gui/shutdown.c -o build/shutdown.o
 
-gcc $CFLAGS -c src/hw/scanner.c -o build/scanner.o
-
+# Библиотеки
 gcc $CFLAGS -c src/lib/string.c -o build/string.o
+
+# ФС
+gcc $CFLAGS -c src/fs/fat32.c -o build/fat32.o
 
 echo "Linking..."
 ld -m elf_i386 -T linker.ld -o build/kernel.bin \
@@ -77,6 +76,7 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/keyboard.o \
     build/mouse.o \
     build/vesa.o \
+    build/ata.o \
     build/ports.o \
     build/cursor.o \
     build/event.o \
@@ -88,13 +88,9 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/scanner.o \
     build/power.o \
     build/shutdown.o \
-    build/ata.o \
-    build/usb.o \
-    build/uhci.o \
-    build/ehci.o \
-    build/ohci.o \
-    build/hid.o \
     build/string.o \
+    build/fat32.o \
+    build/pci.o \
     -nostdlib
 
 echo "Creating ISO..."
@@ -104,4 +100,4 @@ cp grub/grub.cfg iso/boot/grub/
 grub-mkrescue -o pozitron.iso iso/
 
 echo "Build complete!"
-qemu-system-i386 -cdrom pozitron.iso -serial stdio
+qemu-system-x86_64 -cdrom pozitron.iso -serial stdio

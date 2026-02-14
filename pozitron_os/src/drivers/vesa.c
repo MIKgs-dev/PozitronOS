@@ -427,7 +427,7 @@ struct vbe_mode_info {
 } __attribute__((packed));
 
 static struct fb_info fb = {0};
-static uint32_t* back_buffer = NULL;
+static void* back_buffer = NULL;  // Изменено с uint32_t* на void*
 static uint8_t double_buffer_enabled = 0;
 
 // Dirty rectangles
@@ -450,29 +450,26 @@ void vesa_init_dirty(void) {
 void vesa_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (!dirty_system_initialized) return;
     
-    // Обрезаем по границам
     if (x >= fb.width) return;
     if (y >= fb.height) return;
     if (x + w > fb.width) w = fb.width - x;
     if (y + h > fb.height) h = fb.height - y;
     if (w == 0 || h == 0) return;
     
-    // Ищем пересечения с существующими
     for (uint32_t i = 0; i < dirty_count; i++) {
         dirty_rect_t* r = &dirty_rects[i];
         
         if (x >= r->x && y >= r->y && 
             x + w <= r->x + r->w && y + h <= r->y + r->h) {
-            return; // Полностью внутри
+            return;
         }
         
         if (r->x >= x && r->y >= y && 
             r->x + r->w <= x + w && r->y + r->h <= y + h) {
-            r->x = x; r->y = y; r->w = w; r->h = h; // Заменяем
+            r->x = x; r->y = y; r->w = w; r->h = h;
             return;
         }
         
-        // Если пересекаются - объединяем
         if (x < r->x + r->w && x + w > r->x &&
             y < r->y + r->h && y + h > r->y) {
             uint32_t new_x = (x < r->x) ? x : r->x;
@@ -485,7 +482,6 @@ void vesa_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
         }
     }
     
-    // Добавляем новый если есть место
     if (dirty_count < MAX_DIRTY_RECTS) {
         dirty_rects[dirty_count].x = x;
         dirty_rects[dirty_count].y = y;
@@ -493,7 +489,6 @@ void vesa_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
         dirty_rects[dirty_count].h = h;
         dirty_count++;
     } else {
-        // Переполнение - помечаем всё
         vesa_mark_dirty_all();
     }
 }
@@ -508,7 +503,6 @@ void vesa_mark_dirty_all(void) {
     dirty_rects[0].h = fb.height;
 }
 
-// Быстрое копирование памяти
 static inline void fast_copy(uint32_t* dst, uint32_t* src, uint32_t words) {
     asm volatile (
         "rep movsl\n"
@@ -523,24 +517,22 @@ void vesa_update_dirty(void) {
         return;
     }
     
-    // Для каждого dirty rectangle
+    uint32_t bytes_per_pixel = fb.bpp / 8;
+    
     for (uint32_t i = 0; i < dirty_count; i++) {
         dirty_rect_t* r = &dirty_rects[i];
         
-        // Для каждой строки
         for (uint32_t y = r->y; y < r->y + r->h && y < fb.height; y++) {
-            uint8_t* src = (uint8_t*)&back_buffer[y * fb.pitch + r->x * (fb.bpp / 8)];
-            uint8_t* dst = (uint8_t*)&fb.address[y * fb.pitch + r->x * (fb.bpp / 8)];
-            uint32_t bytes = r->w * (fb.bpp / 8);
+            uint8_t* src = (uint8_t*)back_buffer + y * fb.pitch + r->x * bytes_per_pixel;
+            uint8_t* dst = (uint8_t*)fb.address + y * fb.pitch + r->x * bytes_per_pixel;
+            uint32_t bytes = r->w * bytes_per_pixel;
             
-            // Копируем байт за байтом для 24-битного режима
             for (uint32_t b = 0; b < bytes; b++) {
                 dst[b] = src[b];
             }
         }
     }
     
-    // Очищаем dirty rectangles
     vesa_clear_dirty();
 }
 
@@ -552,30 +544,6 @@ uint32_t vesa_get_dirty_count(void) {
     return dirty_count;
 }
 
-// Отладочная информация
-void vesa_debug_dirty(void) {
-    serial_puts("[DIRTY] Count: ");
-    serial_puts_num(dirty_count);
-    serial_puts("\n");
-    
-    for (uint32_t i = 0; i < dirty_count; i++) {
-        serial_puts("  [");
-        serial_puts_num(i);
-        serial_puts("] x=");
-        serial_puts_num(dirty_rects[i].x);
-        serial_puts(" y=");
-        serial_puts_num(dirty_rects[i].y);
-        serial_puts(" w=");
-        serial_puts_num(dirty_rects[i].w);
-        serial_puts(" h=");
-        serial_puts_num(dirty_rects[i].h);
-        serial_puts(" area=");
-        serial_puts_num(dirty_rects[i].w * dirty_rects[i].h);
-        serial_puts("\n");
-    }
-}
-
-// Получить информацию о dirty rectangle
 uint8_t vesa_get_dirty_rect(uint32_t index, uint32_t* x, uint32_t* y, uint32_t* w, uint32_t* h) {
     if (index >= dirty_count) return 0;
     
@@ -593,6 +561,14 @@ void vesa_cache_background(void) {
     if (!fb.found || !double_buffer_enabled) return;
     
     size_t buffer_size = fb.width * fb.height * (fb.bpp / 8);
+    
+    // ОСВОБОЖДАЕМ старый кэш если есть
+    if (background_cache) {
+        kfree(background_cache);
+        background_cache = NULL;
+    }
+    
+    // ВЫДЕЛЯЕМ как void*, потом будем кастовать по необходимости
     background_cache = (uint32_t*)kmalloc(buffer_size);
     
     if (!background_cache) {
@@ -600,17 +576,32 @@ void vesa_cache_background(void) {
         return;
     }
     
-    uint32_t bg_color = 0xC0C0C0; // Светло-серый
-
-    for (uint32_t y = 0; y < fb.height; y++) {
-        for (uint32_t x = 0; x < fb.width; x++) {
-            background_cache[y * fb.width + x] = bg_color;
+    uint32_t bg_color = 0xC0C0C0;  // Светло-серый
+    uint8_t r = (bg_color >> 16) & 0xFF;
+    uint8_t g = (bg_color >> 8) & 0xFF;
+    uint8_t b = bg_color & 0xFF;
+    
+    uint32_t bytes_per_pixel = fb.bpp / 8;
+    uint8_t* cache = (uint8_t*)background_cache;
+    
+    if (fb.bpp == 32) {
+        // 32-бит: пишем uint32_t
+        uint32_t* cache32 = (uint32_t*)cache;
+        for (uint32_t i = 0; i < fb.width * fb.height; i++) {
+            cache32[i] = bg_color;
+        }
+    } else if (fb.bpp == 24) {
+        // 24-бит: пишем 3 байта на пиксель
+        for (uint32_t i = 0; i < buffer_size; i += 3) {
+            cache[i] = b;
+            cache[i + 1] = g;
+            cache[i + 2] = r;
         }
     }
     
     background_cached = 1;
     serial_puts("[VESA] Background cached (");
-    serial_puts_num(fb.width * fb.height * 4);
+    serial_puts_num(buffer_size);
     serial_puts(" bytes)\n");
 }
 
@@ -618,32 +609,34 @@ void vesa_restore_background(void) {
     if (!background_cached || !background_cache || !back_buffer) return;
     
     size_t total_pixels = fb.width * fb.height;
-    fast_copy(back_buffer, background_cache, total_pixels);
+    fast_copy((uint32_t*)back_buffer, background_cache, total_pixels);
 }
 
 void vesa_restore_background_dirty(void) {
     if (!background_cached || !background_cache || !back_buffer || dirty_count == 0) return;
     
-    // НЕ трогаем область курсора - он сам управляет своим фоном
+    uint32_t bytes_per_pixel = fb.bpp / 8;
+    uint8_t* bb = (uint8_t*)back_buffer;
+    uint8_t* cache = (uint8_t*)background_cache;
+    
     uint32_t cursor_x, cursor_y, cursor_w, cursor_h;
     vesa_cursor_get_area(&cursor_x, &cursor_y, &cursor_w, &cursor_h);
     
     for (uint32_t i = 0; i < dirty_count; i++) {
         dirty_rect_t* r = &dirty_rects[i];
         
-        // Пропускаем область курсора
-        //if (cursor_x < r->x + r->w && cursor_x + cursor_w > r->x &&
-            //cursor_y < r->y + r->h && cursor_y + cursor_h > r->y) {
-            //continue;
-        //}
-        
-        // Восстанавливаем фон
         for (uint32_t y = r->y; y < r->y + r->h && y < fb.height; y++) {
-            uint32_t* src = &background_cache[y * fb.width + r->x];
-            uint32_t* dst = &back_buffer[y * fb.width + r->x];
-            uint32_t words = r->w;
+            // cache: храним построчно без питча (width * bytes_per_pixel)
+            uint32_t cache_offset = y * fb.width * bytes_per_pixel + r->x * bytes_per_pixel;
             
-            fast_copy(dst, src, words);
+            // back buffer: с учетом питча!
+            uint32_t bb_offset = y * fb.pitch + r->x * bytes_per_pixel;
+            
+            uint32_t copy_bytes = r->w * bytes_per_pixel;
+            
+            for (uint32_t x = 0; x < copy_bytes; x++) {
+                bb[bb_offset + x] = cache[cache_offset + x];
+            }
         }
     }
 }
@@ -662,7 +655,6 @@ void vesa_free_background_cache(void) {
 static int find_vbe_info(void) {
     serial_puts("[VESA] Scanning for framebuffer (fallback)...\n");
     
-    // Массив возможных адресов фреймбуфера
     uint32_t test_addresses[] = {0xFD000000, 0xE0000000, 0xB8000000, 0xA0000000};
     
     for(int i = 0; i < 4; i++) {
@@ -683,8 +675,6 @@ static int find_vbe_info(void) {
             test_fb[0] = original;
             fb.address = (uint32_t*)test_addresses[i];
             fb.found = 1;
-            
-            // Стандартные значения по умолчанию
             fb.width = 1024;
             fb.height = 768;
             fb.bpp = 32;
@@ -709,16 +699,21 @@ int vesa_enable_double_buffer(void) {
     }
     
     size_t buffer_size = fb.width * fb.height * (fb.bpp / 8);
-    back_buffer = (uint32_t*)kmalloc(buffer_size);
+    
+    // ВАЖНО: выделяем как void*, никаких кастов!
+    back_buffer = kmalloc(buffer_size);
     
     if (!back_buffer) {
-        serial_puts("[VESA] ERROR: Failed to allocate back buffer\n");
+        serial_puts("[VESA] ERROR: Failed to allocate back buffer (");
+        serial_puts_num(buffer_size);
+        serial_puts(" bytes)\n");
         return 0;
     }
     
-    // Очищаем
-    for (size_t i = 0; i < fb.width * fb.height; i++) {
-        back_buffer[i] = 0;
+    // Очищаем буфер
+    uint8_t* buf = (uint8_t*)back_buffer;
+    for (size_t i = 0; i < buffer_size; i++) {
+        buf[i] = 0;
     }
     
     double_buffer_enabled = 1;
@@ -740,34 +735,83 @@ void vesa_disable_double_buffer(void) {
 void vesa_swap_buffers(void) {
     if (!double_buffer_enabled || !back_buffer || !fb.found) return;
     
-    // ВАЖНО: Перед копированием буфера нужно скрыть курсор
-    // чтобы он не скопировался вместе с буфером
-    // (курсор рисуется напрямую во фронт-буфере)
+    uint8_t* fb_ptr = (uint8_t*)fb.address;
+    uint8_t* bb_ptr = (uint8_t*)back_buffer;
     
-    // Только быстрое копирование back buffer -> front buffer
-    size_t total_pixels = fb.width * fb.height;
-    fast_copy(fb.address, back_buffer, total_pixels);
+    if (fb.bpp == 32) {
+        // 32-бит: rep movsl (быстро)
+        uint32_t* dst = (uint32_t*)fb_ptr;
+        uint32_t* src = (uint32_t*)bb_ptr;
+        uint32_t words = fb.width * fb.height;
+        asm volatile ("rep movsl" : "+D"(dst), "+S"(src), "+c"(words) : : "memory");
+    } else {
+        // 24-бит: копируем по 4 байта, пока можно
+        uint32_t bytes_per_line = fb.width * 3;
+        uint32_t pitch_diff = fb.pitch - bytes_per_line;
+        
+        for (uint32_t y = 0; y < fb.height; y++) {
+            // Копируем строку по 4 байта
+            uint32_t words = bytes_per_line / 4;
+            uint32_t* dst = (uint32_t*)fb_ptr;
+            uint32_t* src = (uint32_t*)bb_ptr;
+            asm volatile ("rep movsl" : "+D"(dst), "+S"(src), "+c"(words) : : "memory");
+            
+            // Остаток 0-3 байта
+            uint32_t rem = bytes_per_line % 4;
+            uint8_t* dst8 = (uint8_t*)dst;
+            uint8_t* src8 = (uint8_t*)src;
+            for (uint32_t i = 0; i < rem; i++) dst8[i] = src8[i];
+            
+            fb_ptr += fb.pitch;
+            bb_ptr += bytes_per_line;
+        }
+    }
 }
 
-void vesa_clear_back_buffer(color_t color) {
+void vesa_clear_back_buffer(uint32_t color) {
     if (!double_buffer_enabled || !back_buffer) return;
     
-    size_t total_pixels = fb.width * fb.height;
-    for (size_t i = 0; i < total_pixels; i++) {
-        back_buffer[i] = color;
+    uint32_t bytes_per_pixel = fb.bpp / 8;
+    size_t buffer_size = fb.width * fb.height * bytes_per_pixel;
+    uint8_t* buf = (uint8_t*)back_buffer;
+    
+    // Разбиваем цвет на байты
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    
+    if (bytes_per_pixel == 4) {
+        // 32-бит: пишем uint32_t
+        uint32_t* buf32 = (uint32_t*)back_buffer;
+        size_t total_pixels = fb.width * fb.height;
+        for (size_t i = 0; i < total_pixels; i++) {
+            buf32[i] = color;
+        }
+    } else if (bytes_per_pixel == 3) {
+        // 24-бит: пишем 3 байта на пиксель
+        for (size_t i = 0; i < buffer_size; i += 3) {
+            buf[i] = b;
+            buf[i + 1] = g;
+            buf[i + 2] = r;
+        }
+    } else if (bytes_per_pixel == 2) {
+        // 16-бит: RGB565
+        uint16_t rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+        uint16_t* buf16 = (uint16_t*)back_buffer;
+        size_t total_pixels = fb.width * fb.height;
+        for (size_t i = 0; i < total_pixels; i++) {
+            buf16[i] = rgb565;
+        }
     }
 }
 
 // ===== ИНИЦИАЛИЗАЦИЯ =====
 
-// Изменяем прототип функции
 int vesa_init(multiboot_info_t* mb_info) {
     serial_puts("[VESA] Initializing...\n");
     
-    // Даем время для инициализации оборудования
     for(int i = 0; i < 1000000; i++) asm volatile("nop");
     
-    // Сначала пробуем использовать информацию из Multiboot (если предоставлена)
     if (mb_info && (mb_info->flags & (1 << 12))) {
         serial_puts("[VESA] Trying to use Multiboot framebuffer info...\n");
         
@@ -777,7 +821,6 @@ int vesa_init(multiboot_info_t* mb_info) {
         fb.bpp = mb_info->framebuffer_bpp;
         fb.pitch = mb_info->framebuffer_pitch;
         
-        // Проверяем, что адрес валидный
         if (fb.address) {
             serial_puts("[VESA] Testing Multiboot framebuffer at 0x");
             uint32_t addr = (uint32_t)fb.address;
@@ -787,7 +830,6 @@ int vesa_init(multiboot_info_t* mb_info) {
             }
             serial_puts("\n");
             
-            // Тестовый пиксель для проверки доступности
             volatile uint32_t* test_fb = (volatile uint32_t*)fb.address;
             uint32_t original = test_fb[0];
             test_fb[0] = 0x00AABBCC;
@@ -808,7 +850,6 @@ int vesa_init(multiboot_info_t* mb_info) {
                 serial_puts_num(fb.pitch);
                 serial_puts(" bytes\n");
                 
-                // Переходим к инициализации систем
                 goto init_systems;
             }
         }
@@ -818,14 +859,12 @@ int vesa_init(multiboot_info_t* mb_info) {
         serial_puts("[VESA] No Multiboot framebuffer info available\n");
     }
     
-    // Если Multiboot не сработал, используем старый метод сканирования
     if (!find_vbe_info()) {
         serial_puts("[VESA] ERROR: No framebuffer found!\n");
         return 0;
     }
     
 init_systems:
-    // Общая инициализация (выполняется в любом случае)
     vesa_fill(0x000000);
     
     if (vesa_enable_double_buffer()) {
@@ -849,45 +888,60 @@ init_systems:
 }
 
 // ===== ПРИМИТИВЫ РИСОВАНИЯ =====
+
 void vesa_put_pixel(uint32_t x, uint32_t y, color_t color) {
     if(!fb.found || x >= fb.width || y >= fb.height) return;
     
-    uint32_t* buffer = (double_buffer_enabled && back_buffer) ? back_buffer : fb.address;
-    uint32_t offset;
-    
-    if (fb.bpp == 24) {
-        // 24-битный режим: 3 байта на пиксель
-        offset = y * fb.pitch + x * 3; // pitch уже в байтах!
-        uint8_t* byte_buffer = (uint8_t*)buffer;
-        
-        // Разбиваем color на RGB компоненты
-        byte_buffer[offset] = color & 0xFF;          // Blue
-        byte_buffer[offset + 1] = (color >> 8) & 0xFF;  // Green
-        byte_buffer[offset + 2] = (color >> 16) & 0xFF; // Red
-    } else if (fb.bpp == 32) {
-        // 32-битный режим: 4 байта на пиксель
-        offset = y * (fb.pitch / 4) + x; // pitch в байтах, делим на 4 для uint32_t
-        buffer[offset] = color;
+    uint8_t* buffer;
+    if (double_buffer_enabled && back_buffer) {
+        buffer = (uint8_t*)back_buffer;
     } else {
-        // 16-битный режим (если потребуется)
-        offset = y * (fb.pitch / 2) + x; // pitch в байтах, делим на 2 для uint16_t
-        uint16_t* short_buffer = (uint16_t*)buffer;
-        // Преобразование color в RGB565
+        buffer = (uint8_t*)fb.address;
+    }
+    
+    uint32_t bytes_per_pixel = fb.bpp / 8;
+    uint32_t offset = y * fb.pitch + x * bytes_per_pixel;
+    
+    if (bytes_per_pixel == 4) {
+        // 32-бит
+        uint32_t* buf32 = (uint32_t*)buffer;
+        buf32[y * (fb.pitch / 4) + x] = color;
+    } else if (bytes_per_pixel == 3) {
+        // 24-бит
+        buffer[offset] = color & 0xFF;          // Blue
+        buffer[offset + 1] = (color >> 8) & 0xFF;  // Green
+        buffer[offset + 2] = (color >> 16) & 0xFF; // Red
+    } else if (bytes_per_pixel == 2) {
+        // 16-бит
+        uint16_t* buf16 = (uint16_t*)buffer;
         uint8_t r = (color >> 16) & 0xFF;
         uint8_t g = (color >> 8) & 0xFF;
         uint8_t b = color & 0xFF;
         uint16_t rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-        short_buffer[offset] = rgb565;
+        buf16[y * (fb.pitch / 2) + x] = rgb565;
     }
 }
 
 color_t vesa_get_pixel(uint32_t x, uint32_t y) {
     if(!fb.found || x >= fb.width || y >= fb.height) return 0;
     
+    uint32_t bytes_per_pixel = fb.bpp / 8;
+    
     if (double_buffer_enabled && back_buffer) {
-        return back_buffer[y * fb.width + x];
+        uint8_t* buf = (uint8_t*)back_buffer;
+        uint32_t offset = y * fb.pitch + x * bytes_per_pixel;
+        
+        if (bytes_per_pixel == 4) {
+            return ((uint32_t*)buf)[y * (fb.pitch / 4) + x];
+        } else if (bytes_per_pixel == 3) {
+            uint32_t b = buf[offset];
+            uint32_t g = buf[offset + 1];
+            uint32_t r = buf[offset + 2];
+            return (r << 16) | (g << 8) | b;
+        }
     }
-    return fb.address[y * fb.width + x];
+    
+    return 0;
 }
 
 void vesa_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, color_t color) {
@@ -931,33 +985,6 @@ void vesa_draw_line(uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, color_t 
     }
 }
 
-void vesa_draw_circle(uint32_t cx, uint32_t cy, uint32_t radius, color_t color) {
-    if(!fb.found) return;
-    
-    int x = 0;
-    int y = radius;
-    int d = 3 - 2 * radius;
-    
-    while(y >= x) {
-        vesa_put_pixel(cx + x, cy + y, color);
-        vesa_put_pixel(cx - x, cy + y, color);
-        vesa_put_pixel(cx + x, cy - y, color);
-        vesa_put_pixel(cx - x, cy - y, color);
-        vesa_put_pixel(cx + y, cy + x, color);
-        vesa_put_pixel(cx - y, cy + x, color);
-        vesa_put_pixel(cx + y, cy - x, color);
-        vesa_put_pixel(cx - y, cy - x, color);
-        
-        x++;
-        if(d > 0) {
-            y--;
-            d = d + 4 * (x - y) + 10;
-        } else {
-            d = d + 4 * x + 6;
-        }
-    }
-}
-
 void vesa_fill(color_t color) {
     if(!fb.found) return;
     
@@ -965,9 +992,26 @@ void vesa_fill(color_t color) {
         vesa_clear_back_buffer(color);
         vesa_mark_dirty_all();
     } else {
-        uint32_t total_pixels = fb.width * fb.height;
-        for(uint32_t i = 0; i < total_pixels; i++) {
-            fb.address[i] = color;
+        uint32_t bytes_per_pixel = fb.bpp / 8;
+        uint8_t* buf = (uint8_t*)fb.address;
+        size_t buffer_size = fb.height * fb.pitch;
+        
+        uint8_t r = (color >> 16) & 0xFF;
+        uint8_t g = (color >> 8) & 0xFF;
+        uint8_t b = color & 0xFF;
+        
+        if (bytes_per_pixel == 4) {
+            uint32_t* buf32 = (uint32_t*)buf;
+            size_t total_pixels = fb.width * fb.height;
+            for (size_t i = 0; i < total_pixels; i++) {
+                buf32[i] = color;
+            }
+        } else if (bytes_per_pixel == 3) {
+            for (size_t i = 0; i < buffer_size; i += 3) {
+                buf[i] = b;
+                buf[i + 1] = g;
+                buf[i + 2] = r;
+            }
         }
     }
 }
@@ -1125,7 +1169,7 @@ uint8_t vesa_is_double_buffer_enabled(void) {
     return double_buffer_enabled && (back_buffer != NULL);
 }
 
-uint32_t* vesa_get_back_buffer(void) {
+void* vesa_get_back_buffer(void) {
     return back_buffer;
 }
 
