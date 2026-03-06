@@ -183,6 +183,7 @@ static const pci_device_db_t pci_database[] = {
     // Intel
     {0x8086, 0x7010, "Intel PIIX3 IDE", DEV_DISK_IDE, "Intel 82371SB IDE"},
     {0x8086, 0x7111, "Intel PIIX4 IDE", DEV_DISK_IDE, "Intel 82371AB IDE"},
+    {0x8086, 0x2829, "Intel ICH6 SATA", DEV_DISK_SATA, "Intel ICH6 AHCI"},
     {0x8086, 0x2821, "Intel ICH8 SATA", DEV_DISK_SATA, "Intel ICH8 AHCI"},
     {0x8086, 0x2922, "Intel ICH9 SATA", DEV_DISK_SATA, "Intel ICH9 AHCI"},
     {0x8086, 0x1C02, "Intel 6 Series SATA", DEV_DISK_SATA, "Intel 6 Series AHCI"},

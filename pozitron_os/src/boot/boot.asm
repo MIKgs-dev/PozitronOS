@@ -18,9 +18,6 @@ multiboot_header:
     
     ; ВАЖНО: Это должно быть 1 для линейного фреймбуфера!
     dd 0                       ; 1 = линейный фреймбуфер (Linear Framebuffer)
-    ;dd 1024                    ; ширина
-    ;dd 768                     ; высота
-    ;dd 32                      ; глубина (бит на пиксель)
 
 section .text
 global _start
@@ -29,6 +26,9 @@ extern kernel_main
 _start:
     ; Настраиваем стек
     mov esp, stack_top
+    
+    ; Инициализируем stack_guard
+    mov dword [stack_guard], 0xDEADBEEF
     
     ; Передаем параметры в правильном порядке для C
     push ebx                    ; multiboot_info_t* (второй параметр)
@@ -46,5 +46,10 @@ _start:
 section .bss
 align 16
 stack_bottom:
-    resb 16384
+    resb 16384                  ; 16 KB для стека
 stack_top:
+    
+; Глобальная переменная для защиты стека
+global stack_guard
+stack_guard:
+    resd 1                      ; Резервируем 4 байта

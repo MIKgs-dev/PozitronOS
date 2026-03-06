@@ -6,67 +6,177 @@
 #include "core/event.h"
 #include <stddef.h>
 
-// Состояние клавиатуры
 static keyboard_state_t kbd_state = {0};
 
-// Таблицы скан-кодов (только печатные символы)
-static const char keyboard_map[128] = {
-    0,    0,    '1',  '2',  '3',  '4',  '5',  '6',
-    '7',  '8',  '9',  '0',  '-',  '=',  '\b', '\t',
-    'q',  'w',  'e',  'r',  't',  'y',  'u',  'i',
-    'o',  'p',  '[',  ']',  '\n', 0,    'a',  's',
-    'd',  'f',  'g',  'h',  'j',  'k',  'l',  ';',
-    '\'', '`',  0,    '\\', 'z',  'x',  'c',  'v',
-    'b',  'n',  'm',  ',',  '.',  '/',  0,    '*',
-    0,    ' ',  0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    '7',
-    '8',  '9',  '-',  '4',  '5',  '6',  '+',  '1',
-    '2',  '3',  '0',  '.',  0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0
+// Скан-коды клавиш (PC/AT)
+#define SCAN_ESC        0x01
+#define SCAN_1          0x02
+#define SCAN_2          0x03
+#define SCAN_3          0x04
+#define SCAN_4          0x05
+#define SCAN_5          0x06
+#define SCAN_6          0x07
+#define SCAN_7          0x08
+#define SCAN_8          0x09
+#define SCAN_9          0x0A
+#define SCAN_0          0x0B
+#define SCAN_MINUS      0x0C
+#define SCAN_EQUAL      0x0D
+#define SCAN_BACKSPACE  0x0E
+#define SCAN_TAB        0x0F
+#define SCAN_Q          0x10
+#define SCAN_W          0x11
+#define SCAN_E          0x12
+#define SCAN_R          0x13
+#define SCAN_T          0x14
+#define SCAN_Y          0x15
+#define SCAN_U          0x16
+#define SCAN_I          0x17
+#define SCAN_O          0x18
+#define SCAN_P          0x19
+#define SCAN_LBRACKET   0x1A
+#define SCAN_RBRACKET   0x1B
+#define SCAN_ENTER      0x1C
+#define SCAN_LCTRL      0x1D
+#define SCAN_A          0x1E
+#define SCAN_S          0x1F
+#define SCAN_D          0x20
+#define SCAN_F          0x21
+#define SCAN_G          0x22
+#define SCAN_H          0x23
+#define SCAN_J          0x24
+#define SCAN_K          0x25
+#define SCAN_L          0x26
+#define SCAN_SEMICOLON  0x27
+#define SCAN_QUOTE      0x28
+#define SCAN_BACKTICK   0x29
+#define SCAN_LSHIFT     0x2A
+#define SCAN_BACKSLASH  0x2B
+#define SCAN_Z          0x2C
+#define SCAN_X          0x2D
+#define SCAN_C          0x2E
+#define SCAN_V          0x2F
+#define SCAN_B          0x30
+#define SCAN_N          0x31
+#define SCAN_M          0x32
+#define SCAN_COMMA      0x33
+#define SCAN_DOT        0x34
+#define SCAN_SLASH      0x35
+#define SCAN_RSHIFT     0x36
+#define SCAN_KP_STAR    0x37
+#define SCAN_LALT       0x38
+#define SCAN_SPACE      0x39
+#define SCAN_CAPSLOCK   0x3A
+#define SCAN_F1         0x3B
+#define SCAN_F2         0x3C
+#define SCAN_F3         0x3D
+#define SCAN_F4         0x3E
+#define SCAN_F5         0x3F
+#define SCAN_F6         0x40
+#define SCAN_F7         0x41
+#define SCAN_F8         0x42
+#define SCAN_F9         0x43
+#define SCAN_F10        0x44
+#define SCAN_NUMLOCK    0x45
+#define SCAN_SCROLLLOCK 0x46
+#define SCAN_HOME       0x47
+#define SCAN_KP_7       0x47
+#define SCAN_UP         0x48
+#define SCAN_KP_8       0x48
+#define SCAN_PAGEUP     0x49
+#define SCAN_KP_9       0x49
+#define SCAN_KP_MINUS   0x4A
+#define SCAN_LEFT       0x4B
+#define SCAN_KP_4       0x4B
+#define SCAN_KP_5       0x4C
+#define SCAN_RIGHT      0x4D
+#define SCAN_KP_6       0x4D
+#define SCAN_KP_PLUS    0x4E
+#define SCAN_END        0x4F
+#define SCAN_KP_1       0x4F
+#define SCAN_DOWN       0x50
+#define SCAN_KP_2       0x50
+#define SCAN_PAGEDOWN   0x51
+#define SCAN_KP_3       0x51
+#define SCAN_INSERT     0x52
+#define SCAN_KP_0       0x52
+#define SCAN_DELETE     0x53
+#define SCAN_KP_DOT     0x53
+#define SCAN_F11        0x57
+#define SCAN_F12        0x58
+
+// Таблица преобразования скан-кодов в ASCII (без Shift)
+static const uint8_t scancode_to_ascii[128] = {
+    0,      0,      '1',    '2',    '3',    '4',    '5',    '6',    // 0-7
+    '7',    '8',    '9',    '0',    '-',    '=',    '\b',   '\t',   // 8-15
+    'q',    'w',    'e',    'r',    't',    'y',    'u',    'i',    // 16-23
+    'o',    'p',    '[',    ']',    '\n',   0,      'a',    's',    // 24-31
+    'd',    'f',    'g',    'h',    'j',    'k',    'l',    ';',    // 32-39
+    '\'',   '`',    0,      '\\',   'z',    'x',    'c',    'v',    // 40-47
+    'b',    'n',    'm',    ',',    '.',    '/',    0,      '*',    // 48-55
+    0,      ' ',    0,      0,      0,      0,      0,      0,      // 56-63
+    0,      0,      0,      0,      0,      0,      0,      '7',    // 64-71
+    '8',    '9',    '-',    '4',    '5',    '6',    '+',    '1',    // 72-79
+    '2',    '3',    '0',    '.',    0,      0,      0,      0,      // 80-87
+    0,      0,      0,      0,      0,      0,      0,      0,      // 88-95
+    0,      0,      0,      0,      0,      0,      0,      0,      // 96-103
+    0,      0,      0,      0,      0,      0,      0,      0,      // 104-111
+    0,      0,      0,      0,      0,      0,      0,      0,      // 112-119
+    0,      0,      0,      0,      0,      0,      0,      0       // 120-127
 };
 
-static const char keyboard_map_shift[128] = {
-    0,    0,    '!',  '@',  '#',  '$',  '%',  '^',
-    '&',  '*',  '(',  ')',  '_',  '+',  '\b', '\t',
-    'Q',  'W',  'E',  'R',  'T',  'Y',  'U',  'I',
-    'O',  'P',  '{',  '}',  '\n', 0,    'A',  'S',
-    'D',  'F',  'G',  'H',  'J',  'K',  'L',  ':',
-    '"',  '~',  0,    '|',  'Z',  'X',  'C',  'V',
-    'B',  'N',  'M',  '<',  '>',  '?',  0,    '*',
-    0,    ' ',  0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    '7',
-    '8',  '9',  '-',  '4',  '5',  '6',  '+',  '1',
-    '2',  '3',  '0',  '.',  0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0
+// Таблица для Shift
+static const uint8_t scancode_to_ascii_shift[128] = {
+    0,      0,      '!',    '@',    '#',    '$',    '%',    '^',    // 0-7
+    '&',    '*',    '(',    ')',    '_',    '+',    '\b',   '\t',   // 8-15
+    'Q',    'W',    'E',    'R',    'T',    'Y',    'U',    'I',    // 16-23
+    'O',    'P',    '{',    '}',    '\n',   0,      'A',    'S',    // 24-31
+    'D',    'F',    'G',    'H',    'J',    'K',    'L',    ':',    // 32-39
+    '"',    '~',    0,      '|',    'Z',    'X',    'C',    'V',    // 40-47
+    'B',    'N',    'M',    '<',    '>',    '?',    0,      '*',    // 48-55
+    0,      ' ',    0,      0,      0,      0,      0,      0,      // 56-63
+    0,      0,      0,      0,      0,      0,      0,      '7',    // 64-71
+    '8',    '9',    '-',    '4',    '5',    '6',    '+',    '1',    // 72-79
+    '2',    '3',    '0',    '.',    0,      0,      0,      0,      // 80-87
+    0,      0,      0,      0,      0,      0,      0,      0,      // 88-95
+    0,      0,      0,      0,      0,      0,      0,      0,      // 96-103
+    0,      0,      0,      0,      0,      0,      0,      0,      // 104-111
+    0,      0,      0,      0,      0,      0,      0,      0,      // 112-119
+    0,      0,      0,      0,      0,      0,      0,      0       // 120-127
 };
 
-// Инициализация клавиатуры
 void keyboard_init(void) {
     serial_puts("[KEYBOARD] Initializing...\n");
     
-    // Устанавливаем обработчик прерывания клавиатуры (IRQ1)
     irq_install_handler(1, keyboard_handler);
     
-    // Сброс состояния
     kbd_state.shift = 0;
     kbd_state.ctrl = 0;
     kbd_state.alt = 0;
     kbd_state.caps = 0;
-    kbd_state.numlock = 0;
+    kbd_state.numlock = 1; // По умолчанию включен
     kbd_state.scrolllock = 0;
     
     serial_puts("[KEYBOARD] Initialized\n");
 }
 
-// Обработчик прерывания клавиатуры
+// Определяем, является ли скан-код печатным символом
+static int is_printable(uint8_t scancode) {
+    if (scancode >= 0x47 && scancode <= 0x53) return 0; // Стрелки, Home, End и т.д.
+    if (scancode >= 0x3B && scancode <= 0x44) return 0; // F1-F10
+    if (scancode == SCAN_ESC) return 0;
+    if (scancode == SCAN_BACKSPACE) return 0;
+    if (scancode == SCAN_ENTER) return 0;
+    if (scancode == SCAN_TAB) return 0;
+    if (scancode == SCAN_LCTRL || scancode == SCAN_LALT) return 0;
+    if (scancode == SCAN_LSHIFT || scancode == SCAN_RSHIFT) return 0;
+    if (scancode == SCAN_CAPSLOCK || scancode == SCAN_NUMLOCK) return 0;
+    if (scancode == SCAN_SCROLLLOCK) return 0;
+    if (scancode >= 0x54) return 0; // Всё, что выше 0x53 - спецклавиши
+    
+    return 1;
+}
+
 void keyboard_handler(registers_t* regs) {
     (void)regs;
     
@@ -75,215 +185,123 @@ void keyboard_handler(registers_t* regs) {
     
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
     
-    // Создаём событие
-    event_t event;
+    uint8_t key = scancode & 0x7F;
+    uint8_t released = scancode & 0x80;
     
-    if (scancode & 0x80) { // Отпускание клавиши
-        event.type = EVENT_KEY_RELEASE;
-        event.data1 = scancode & 0x7F; // Код клавиши без флага отпускания
-    } else { // Нажатие клавиши
-        event.type = EVENT_KEY_PRESS;
-        event.data1 = scancode;
-        
-        // Для печатных символов сохраняем символ в data2
-        if (scancode < sizeof(keyboard_map)) {
-            char c = keyboard_scancode_to_char(scancode, kbd_state);
-            event.data2 = (uint32_t)c;
-        }
+    // Обновляем состояние модификаторов
+    switch (key) {
+        case SCAN_LSHIFT:
+        case SCAN_RSHIFT:
+            kbd_state.shift = !released;
+            break;
+        case SCAN_LCTRL:
+            kbd_state.ctrl = !released;
+            break;
+        case SCAN_LALT:
+            kbd_state.alt = !released;
+            break;
+        case SCAN_CAPSLOCK:
+            if (!released) {
+                kbd_state.caps = !kbd_state.caps;
+            }
+            break;
+        case SCAN_NUMLOCK:
+            if (!released) {
+                kbd_state.numlock = !kbd_state.numlock;
+            }
+            break;
+        case SCAN_SCROLLLOCK:
+            if (!released) {
+                kbd_state.scrolllock = !kbd_state.scrolllock;
+            }
+            break;
     }
     
-    event.data2 = 0; // Пока не используется
+    // Создаём событие нажатия/отпускания для всех клавиш
+    event_t event;
+    event.type = released ? EVENT_KEY_RELEASE : EVENT_KEY_PRESS;
+    event.data1 = key;
+    event.data2 = (kbd_state.shift ? 0x01 : 0) | 
+                  (kbd_state.ctrl ? 0x02 : 0) | 
+                  (kbd_state.alt ? 0x04 : 0);
+    event.key.scancode = key;
+    event.key.ascii = 0;
+    event.key.modifiers = event.data2;
     
-    // Отправляем событие в очередь
     event_post(event);
     
-    // Для обратной совместимости - оставляем вывод в VGA
-    if (!(scancode & 0x80)) { // Только нажатия
-        switch (scancode) {
-            case KEY_ENTER:
-                vga_putchar('\n');
-                break;
-            case KEY_BACKSPACE:
-                vga_puts("\b \b");
-                break;
-            default:
-                if (scancode < sizeof(keyboard_map)) {
-                    char c = keyboard_scancode_to_char(scancode, kbd_state);
-                    if (c != 0) {
-                        vga_putchar(c);
-                    }
-                }
-                break;
+    // Для печатных символов (только при нажатии) создаём EVENT_TEXT_INPUT
+    if (!released && is_printable(key)) {
+        uint8_t ascii;
+        
+        // Выбираем таблицу в зависимости от Shift
+        if (kbd_state.shift) {
+            ascii = scancode_to_ascii_shift[key];
+        } else {
+            ascii = scancode_to_ascii[key];
         }
-    }
-    else {
-        // Обновляем состояние модификаторов
-        switch (scancode) {
-            case KEY_LSHIFT:
-            case KEY_RSHIFT:
-                kbd_state.shift = 1;
-                break;
-            case KEY_LCTRL:
-                kbd_state.ctrl = 1;
-                break;
-            case KEY_LALT:
-                kbd_state.alt = 1;
-                break;
-            case KEY_CAPSLOCK:
-                kbd_state.caps = !kbd_state.caps;
-                vga_puts(kbd_state.caps ? "[CAPS ON] " : "[CAPS OFF] ");
-                break;
-            case KEY_NUMLOCK:
-                kbd_state.numlock = !kbd_state.numlock;
-                break;
-            case KEY_SCROLLLOCK:
-                kbd_state.scrolllock = !kbd_state.scrolllock;
-                break;
-                
-            // Специальные клавиши
-            case KEY_ENTER:
-                vga_putchar('\n');
-                serial_write('\n');
-                break;
-                
-            case KEY_BACKSPACE:
-                vga_puts("\b \b"); // Стираем символ
-                break;
-                
-            case KEY_TAB:
-                vga_putchar('\t');
-                break;
-                
-            case KEY_ESC:
-                vga_puts("[ESC] ");
-                break;
-                
-            case KEY_F1:
-                vga_puts("[F1] ");
-                break;
-                
-            case KEY_F2:
-                vga_puts("[F2] ");
-                break;
-                
-            case KEY_F3:
-                vga_puts("[F3] ");
-                break;
-                
-            case KEY_F4:
-                vga_puts("[F4] ");
-                break;
-                
-            case KEY_F5:
-                vga_puts("[F5] ");
-                break;
-                
-            case KEY_F6:
-                vga_puts("[F6] ");
-                break;
-                
-            case KEY_F7:
-                vga_puts("[F7] ");
-                break;
-                
-            case KEY_F8:
-                vga_puts("[F8] ");
-                break;
-                
-            case KEY_F9:
-                vga_puts("[F9] ");
-                break;
-                
-            case KEY_F10:
-                vga_puts("[F10] ");
-                break;
-                
-            // Печатные символы
-            default:
-                if (scancode < sizeof(keyboard_map)) {
-                    char c;
-                    
-                    // Выбираем правильную таблицу в зависимости от SHIFT
-                    if (kbd_state.shift) {
-                        c = keyboard_map_shift[scancode];
-                    } else {
-                        c = keyboard_map[scancode];
-                    }
-                    
-                    // Учитываем CAPS LOCK только для букв
-                    if (kbd_state.caps) {
-                        if (c >= 'a' && c <= 'z') {
-                            c -= 32; // В верхний регистр
-                        } else if (c >= 'A' && c <= 'Z') {
-                            c += 32; // В нижний регистр
-                        }
-                    }
-                    
-                    // Выводим символ если он не нулевой
-                    if (c != 0) {
-                        vga_putchar(c);
-                        serial_write(c); // Только символ в сериал
-                    }
-                }
-                break;
+        
+        // Учитываем Caps Lock (только для букв)
+        if (kbd_state.caps && ascii >= 'a' && ascii <= 'z') {
+            ascii -= 32;
+        } else if (kbd_state.caps && ascii >= 'A' && ascii <= 'Z') {
+            ascii += 32;
         }
+        
+        // Отправляем только если получили осмысленный символ
+        if (ascii >= 32 && ascii <= 126) {
+            event_t text_event;
+            text_event.type = EVENT_TEXT_INPUT;
+            text_event.data1 = (uint32_t)ascii;
+            text_event.data2 = 0;
+            text_event.key.scancode = key;
+            text_event.key.ascii = ascii;
+            text_event.key.modifiers = event.data2;
+            event_post(text_event);
+        }
+        
+        // Для обратной совместимости с VGA
+        if (ascii == '\n') vga_putchar('\n');
+        else if (ascii == '\b') vga_puts("\b \b");
+        else if (ascii >= ' ') vga_putchar(ascii);
     }
+    // Специальные клавиши обрабатываются в core.c через handle_input_special_key
     
-    // Отправляем EOI контроллеру прерываний
     pic_send_eoi(0);
 }
 
-// Преобразование скан-кода в символ (для внешнего использования)
 char keyboard_scancode_to_char(uint8_t scancode, keyboard_state_t state) {
-    if (scancode >= sizeof(keyboard_map)) {
-        return 0;
-    }
+    if (scancode >= 128) return 0;
+    if (!is_printable(scancode)) return 0;
     
-    char c;
-    if (state.shift) {
-        c = keyboard_map_shift[scancode];
-    } else {
-        c = keyboard_map[scancode];
-    }
+    char c = state.shift ? scancode_to_ascii_shift[scancode] : scancode_to_ascii[scancode];
     
-    // Учитываем CAPS LOCK
     if (state.caps) {
-        if (c >= 'a' && c <= 'z') {
-            c -= 32;
-        } else if (c >= 'A' && c <= 'Z') {
-            c += 32;
-        }
+        if (c >= 'a' && c <= 'z') c -= 32;
+        else if (c >= 'A' && c <= 'Z') c += 32;
     }
     
     return c;
 }
 
-// Получить последний скан-код (блокирующий)
 int keyboard_get_scancode(void) {
-    // Ждём данные
     while (!(inb(KEYBOARD_STATUS_PORT) & 0x01)) {
         asm volatile ("pause");
     }
-    
     return inb(KEYBOARD_DATA_PORT);
 }
 
-// Ожидание нажатия любой клавиши
 void keyboard_wait_for_key(void) {
     vga_puts("Press any key to continue...");
     
-    // Сбрасываем буфер клавиатуры
     while (inb(KEYBOARD_STATUS_PORT) & 0x01) {
         inb(KEYBOARD_DATA_PORT);
     }
     
-    // Ждём новое нажатие
     while (1) {
         if (inb(KEYBOARD_STATUS_PORT) & 0x01) {
             uint8_t scancode = inb(KEYBOARD_DATA_PORT);
-            if (!(scancode & 0x80)) { // Только нажатие, не отпускание
-                break;
-            }
+            if (!(scancode & 0x80)) break;
         }
         asm volatile ("hlt");
     }

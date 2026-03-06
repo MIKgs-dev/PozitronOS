@@ -10,7 +10,6 @@
 #include "core/isr.h"
 #include "core/event.h"
 #include "drivers/vesa.h"
-#include "drivers/ata.h"
 #include "kernel/memory.h"
 #include "gui/gui.h"
 #include "hw/scanner.h"
@@ -20,11 +19,26 @@
 #include "kernel/logo.h"
 #include <stddef.h>
 #include "lib/string.h"
-#include "fs/fat32.h"
+#include "kernel/scheduler.h"
+#include "kernel/paging.h"
+#include "kernel/userspace.h"
+#include "drivers/ahci.h"
+#include "kernel/device.h"
+#include "fs/pfs.h"
+#include "drivers/disk.h"
+#include "core/syscall.h"
 
 static uint8_t system_running = 1;
 
-// ============ CALLBACK-ФУНКЦИИ ============
+#define EVENT_PACK_MOUSE(x, y, btn) (((x) & 0xFFFF) | (((y) & 0xFFFF) << 16) | (((btn) & 0xFF) << 24))
+#define EVENT_UNPACK_X(data) ((int16_t)((data) & 0xFFFF))
+#define EVENT_UNPACK_Y(data) ((int16_t)(((data) >> 16) & 0xFFFF))
+#define EVENT_UNPACK_BUTTON(data) (((data) >> 24) & 0xFF)
+
+extern void check_stack_overflow(void);
+
+// ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ДЕМО ============
+
 static void update_progress_callback(Widget* button, void* userdata) {
     if (!button || !userdata) return;
     
@@ -36,7 +50,7 @@ static void update_progress_callback(Widget* button, void* userdata) {
     
     wg_set_progressbar_value(progressbar, progress_value);
     
-    serial_puts("[GUI] Progress updated: ");
+    serial_puts("[DEMO] Progress updated: ");
     serial_puts_num(progress_value);
     serial_puts("%\n");
 }
@@ -46,7 +60,7 @@ static void slider_changed_callback(Widget* slider, void* userdata) {
     
     uint32_t value = wg_get_slider_value(slider);
     
-    serial_puts("[GUI] Slider changed: ");
+    serial_puts("[DEMO] Slider changed: ");
     serial_puts_num(value);
     serial_puts("\n");
 }
@@ -56,7 +70,7 @@ static void checkbox_toggled_callback(Widget* checkbox, void* userdata) {
     
     uint8_t checked = wg_get_checkbox_state(checkbox);
     
-    serial_puts("[GUI] Checkbox ");
+    serial_puts("[DEMO] Checkbox ");
     serial_puts(checked ? "checked" : "unchecked");
     if (checkbox->text) {
         serial_puts(": ");
@@ -65,296 +79,322 @@ static void checkbox_toggled_callback(Widget* checkbox, void* userdata) {
     serial_puts("\n");
 }
 
-// ============ ТЕСТ МАКСИМИЗАЦИИ ============
-static void test_maximize_callback(Widget* button, void* userdata) {
+static void list_item_selected_callback(Widget* list, void* userdata) {
+    if (!list) return;
+    
+    uint32_t selected = wg_list_get_selected(list);
+    serial_puts("[DEMO] List item selected: ");
+    serial_puts_num(selected);
+    serial_puts("\n");
+}
+
+static void dropdown_changed_callback(Widget* dropdown, void* userdata) {
+    if (!dropdown) return;
+    
+    uint32_t selected = wg_dropdown_get_selected(dropdown);
+    serial_puts("[DEMO] Dropdown changed: ");
+    serial_puts_num(selected);
+    serial_puts("\n");
+}
+
+static void tab_changed_callback(Widget* tab, void* userdata) {
+    if (!tab) return;
+    
+    uint32_t active = wg_tab_get_active(tab);
+    serial_puts("[DEMO] Tab changed: ");
+    serial_puts_num(active);
+    serial_puts("\n");
+}
+
+static void menubar_item_callback(void* data) {
+    char* item_name = (char*)data;
+    serial_puts("[DEMO] Menu item clicked: ");
+    serial_puts(item_name);
+    serial_puts("\n");
+}
+
+static void close_demo_window(Widget* button, void* userdata) {
     if (!userdata) return;
     
     Window* window = (Window*)userdata;
+    wm_close_window(window);
     
-    if (window->maximized) {
-        wm_restore_window(window);
-        serial_puts("[TEST] Window restored\n");
-    } else {
-        wm_maximize_window(window);
-        serial_puts("[TEST] Window maximized\n");
-    }
+    serial_puts("[DEMO] Demo window closed\n");
 }
 
-// ============ ТЕСТОВОЕ ОКНО ============
-static Window* create_test_window(const char* title, uint32_t x, uint32_t y, 
-                                  uint32_t width, uint32_t height, uint8_t use_relative) {
-    Window* win = wm_create_window(title, x, y, width, height,
+static void input_changed_callback(Widget* input, void* userdata) {
+    if (!input) return;
+    
+    char* text = wg_input_get_text(input);
+    serial_puts("[DEMO] Input changed: ");
+    serial_puts(text);
+    serial_puts("\n");
+}
+
+// ============ СОЗДАНИЕ ДЕМОНСТРАЦИОННОГО ОКНА ============
+
+static void create_showcase_window(void) {
+    serial_puts("\n=== CREATING GUI SHOWCASE WINDOW ===\n");
+    
+    uint32_t screen_width = vesa_get_width();
+    uint32_t screen_height = vesa_get_height();
+    
+    uint32_t win_width = 800;
+    uint32_t win_height = 600;
+    uint32_t win_x = (screen_width - win_width) / 2;
+    uint32_t win_y = (screen_height - win_height) / 2 - 20;
+    
+    Window* win = wm_create_window("PozitronOS GUI Showcase",
+                                  win_x, win_y, win_width, win_height,
                                   WINDOW_CLOSABLE | WINDOW_MOVABLE | 
                                   WINDOW_HAS_TITLE | WINDOW_MINIMIZABLE |
-                                  WINDOW_MAXIMIZABLE);
+                                  WINDOW_MAXIMIZABLE | WINDOW_RESIZABLE);
     
     if (!win) {
-        serial_puts("[TEST] ERROR: Failed to create test window\n");
-        return NULL;
-    }
-    
-    if (use_relative) {
-        // Относительные координаты
-        
-        // Метка с названием окна
-        wg_create_label_rel(win, title, 0.1f, 0.1f);
-        
-        // Информация о типе окна
-        wg_create_label_rel(win, "This window uses RELATIVE coordinates", 0.1f, 0.2f);
-        wg_create_label_rel(win, "Widgets will scale on maximize!", 0.1f, 0.25f);
-        
-        // Чекбоксы
-        Widget* cb1 = wg_create_checkbox_rel(win, "Feature A (relative)", 0.1f, 0.35f, 1);
-        if (cb1) {
-            wg_set_callback_ex(cb1, checkbox_toggled_callback, NULL);
-        }
-        
-        Widget* cb2 = wg_create_checkbox_rel(win, "Feature B (relative)", 0.1f, 0.42f, 0);
-        if (cb2) {
-            wg_set_callback_ex(cb2, checkbox_toggled_callback, NULL);
-        }
-        
-        // Слайдер
-        wg_create_label_rel(win, "Volume:", 0.1f, 0.5f);
-        Widget* slider = wg_create_slider_rel(win, 0.1f, 0.55f, 0.5f, 0.05f, 0, 100, 50);
-        if (slider) {
-            wg_set_callback_ex(slider, slider_changed_callback, NULL);
-        }
-        
-        // Прогресс-бар
-        wg_create_label_rel(win, "Progress:", 0.1f, 0.65f);
-        Widget* progress = wg_create_progressbar_rel(win, 0.1f, 0.7f, 0.5f, 0.05f, 30);
-        
-        // Кнопки
-        Widget* max_btn = wg_create_button_rel(win, "Maximize/Restore",
-                                              0.65f, 0.35f, 0.25f, 0.1f,
-                                              test_maximize_callback, win);
-        
-        Widget* update_btn = wg_create_button_rel(win, "Update Progress",
-                                                0.65f, 0.5f, 0.25f, 0.1f,
-                                                update_progress_callback, progress);
-    } else {
-        // Абсолютные координаты
-        
-        // Метка с названием окна
-        wg_create_label(win, title, 20, 40);
-        
-        // Информация о типе окна
-        wg_create_label(win, "This window uses ABSOLUTE coordinates", 20, 70);
-        wg_create_label(win, "Widgets WON'T scale on maximize!", 20, 90);
-        
-        // Чекбоксы
-        Widget* cb1 = wg_create_checkbox(win, "Feature A (absolute)", 40, 120, 1);
-        if (cb1) {
-            wg_set_callback_ex(cb1, checkbox_toggled_callback, NULL);
-        }
-        
-        Widget* cb2 = wg_create_checkbox(win, "Feature B (absolute)", 40, 145, 0);
-        if (cb2) {
-            wg_set_callback_ex(cb2, checkbox_toggled_callback, NULL);
-        }
-        
-        // Слайдер
-        wg_create_label(win, "Volume:", 20, 175);
-        Widget* slider = wg_create_slider(win, 40, 195, 200, 0, 100, 50);
-        if (slider) {
-            wg_set_callback_ex(slider, slider_changed_callback, NULL);
-        }
-        
-        // Прогресс-бар
-        wg_create_label(win, "Progress:", 20, 225);
-        Widget* progress = wg_create_progressbar(win, 40, 245, 200, 20, 30);
-        
-        // Кнопки
-        Widget* max_btn = wg_create_button_ex(win, "Maximize/Restore",
-                                            250, 120, 120, 30,
-                                            test_maximize_callback, win);
-        
-        Widget* update_btn = wg_create_button_ex(win, "Update Progress",
-                                               250, 165, 120, 30,
-                                               update_progress_callback, progress);
-    }
-    
-    return win;
-}
-
-// ============ ДЕМО-ИНТЕРФЕЙС ============
-static void create_demo_ui(void) {
-    serial_puts("\n=== CREATING DEMO UI ===\n");
-    
-    // Главное демо-окно
-    Window* main_win = wm_create_window("PozitronOS GUI Demo", 
-                                       200, 100, 500, 400, 
-                                       WINDOW_CLOSABLE | WINDOW_MOVABLE | 
-                                       WINDOW_HAS_TITLE | WINDOW_MINIMIZABLE |
-                                       WINDOW_MAXIMIZABLE);
-    
-    if (!main_win) {
-        serial_puts("[DEMO] ERROR: Failed to create main window\n");
+        serial_puts("[DEMO] ERROR: Failed to create showcase window\n");
         return;
     }
     
-    // Используем относительные координаты
-    wg_create_label_rel(main_win, "PozitronOS GUI Demo", 
-                       0.05f, 0.05f);
-    
-    wg_create_label_rel(main_win, "New coordinate system:", 0.05f, 0.12f);
-    wg_create_label_rel(main_win, "1. Relative coordinates (0.0 - 1.0)", 0.1f, 0.17f);
-    wg_create_label_rel(main_win, "2. Auto-scaling on maximize/resize", 0.1f, 0.22f);
-    wg_create_label_rel(main_win, "3. Check serial output for events!", 0.05f, 0.32f);
-    
-    // Горизонтальная линия
-    wg_create_label_rel(main_win, "--------------------------------------------", 
-                       0.05f, 0.37f);
-    
-    // Чекбоксы
-    Widget* cb1 = wg_create_checkbox_rel(main_win, "Use new coordinate system", 
-                                        0.1f, 0.42f, 1);
-    if (cb1) {
-        wg_set_callback_ex(cb1, checkbox_toggled_callback, NULL);
+    // === МЕНЮ-БАР (сдвинут вниз, чтобы не перекрывать заголовок) ===
+    Widget* menubar = wg_create_menubar(win, 0.0f, 0.05f, 1.0f);  // 5% от верхнего края
+    if (menubar) {
+        uint32_t file_menu = wg_menubar_add_menu(menubar, "File");
+        uint32_t edit_menu = wg_menubar_add_menu(menubar, "Edit");
+        uint32_t view_menu = wg_menubar_add_menu(menubar, "View");
+        uint32_t help_menu = wg_menubar_add_menu(menubar, "Help");
+        
+        wg_menubar_add_item(menubar, file_menu, "New", menubar_item_callback, "New");
+        wg_menubar_add_item(menubar, file_menu, "Open...", menubar_item_callback, "Open");
+        wg_menubar_add_item(menubar, file_menu, "Save", menubar_item_callback, "Save");
+        wg_menubar_add_item(menubar, file_menu, "Save As...", menubar_item_callback, "Save As");
+        wg_menubar_add_item(menubar, file_menu, "Exit", menubar_item_callback, "Exit");
+        
+        wg_menubar_add_item(menubar, edit_menu, "Undo", menubar_item_callback, "Undo");
+        wg_menubar_add_item(menubar, edit_menu, "Redo", menubar_item_callback, "Redo");
+        wg_menubar_add_item(menubar, edit_menu, "Cut", menubar_item_callback, "Cut");
+        wg_menubar_add_item(menubar, edit_menu, "Copy", menubar_item_callback, "Copy");
+        wg_menubar_add_item(menubar, edit_menu, "Paste", menubar_item_callback, "Paste");
+        
+        wg_menubar_add_item(menubar, view_menu, "Zoom In", menubar_item_callback, "Zoom In");
+        wg_menubar_add_item(menubar, view_menu, "Zoom Out", menubar_item_callback, "Zoom Out");
+        wg_menubar_add_item(menubar, view_menu, "Full Screen", menubar_item_callback, "Full Screen");
+        
+        wg_menubar_add_item(menubar, help_menu, "About", menubar_item_callback, "About");
+        wg_menubar_add_item(menubar, help_menu, "Documentation", menubar_item_callback, "Docs");
     }
     
-    Widget* cb2 = wg_create_checkbox_rel(main_win, "Auto-scale widgets", 
-                                        0.1f, 0.48f, 1);
-    if (cb2) {
-        wg_set_callback_ex(cb2, checkbox_toggled_callback, NULL);
-    }
-    
-    Widget* cb3 = wg_create_checkbox_rel(main_win, "Enable smart layout", 
-                                        0.1f, 0.54f, 0);
-    if (cb3) {
-        wg_set_callback_ex(cb3, checkbox_toggled_callback, NULL);
-    }
-    
-    // Слайдеры
-    wg_create_label_rel(main_win, "Brightness:", 0.1f, 0.62f);
-    Widget* slider1 = wg_create_slider_rel(main_win, 0.1f, 0.67f, 0.4f, 0.04f, 0, 100, 75);
-    if (slider1) {
-        wg_set_callback_ex(slider1, slider_changed_callback, NULL);
-    }
-    
-    wg_create_label_rel(main_win, "Contrast:", 0.1f, 0.74f);
-    Widget* slider2 = wg_create_slider_rel(main_win, 0.1f, 0.79f, 0.4f, 0.04f, 0, 100, 50);
-    if (slider2) {
-        wg_set_callback_ex(slider2, slider_changed_callback, NULL);
-    }
-    
-    // Прогресс-бар
-    wg_create_label_rel(main_win, "System load:", 0.6f, 0.42f);
-    Widget* progress = wg_create_progressbar_rel(main_win, 0.6f, 0.47f, 0.3f, 0.06f, 45);
+    // === ЛЕВАЯ КОЛОНКА ===
+    float left_col = 0.03f;
+    float col_width = 0.30f;
+    float row_height = 0.06f;
+    float current_y = 0.15f;  // Начинаем ниже меню-бара
     
     // Кнопки
-    Widget* update_btn = wg_create_button_rel(main_win, "Update Load",
-                                            0.6f, 0.56f, 0.3f, 0.08f,
-                                            update_progress_callback, progress);
+    wg_create_label(win, "Buttons:", left_col, current_y);
+    current_y += 0.03f;
     
-    Widget* max_btn = wg_create_button_rel(main_win, "Maximize Window",
-                                         0.6f, 0.67f, 0.3f, 0.08f,
-                                         test_maximize_callback, main_win);
+    wg_create_button(win, "Button 1", left_col, current_y, 0.12f, 0.04f, NULL, NULL);
+    wg_create_button(win, "Button 2", left_col + 0.13f, current_y, 0.12f, 0.04f, NULL, NULL);
+    wg_create_button(win, "Button 3", left_col + 0.26f, current_y, 0.12f, 0.04f, NULL, NULL);
     
-    // Создаём тестовые окна для сравнения
-    serial_puts("[DEMO] Creating test windows for comparison...\n");
+    current_y += 0.06f;
     
-    // Окно с относительными координатами
-    Window* rel_win = create_test_window("Relative Coords Window", 
-                                        100, 150, 400, 350, 1);
+    // Чекбоксы
+    wg_create_label(win, "Checkboxes:", left_col, current_y);
+    current_y += 0.03f;
     
-    // Окно с абсолютными координатами
-    Window* abs_win = create_test_window("Absolute Coords Window", 
-                                        550, 150, 400, 350, 0);
+    Widget* cb1 = wg_create_checkbox(win, "Option 1", left_col, current_y, 1);
+    Widget* cb2 = wg_create_checkbox(win, "Option 2", left_col, current_y + 0.04f, 0);
+    Widget* cb3 = wg_create_checkbox(win, "Option 3", left_col, current_y + 0.08f, 0);
     
-    if (rel_win && abs_win) {
-        serial_puts("[DEMO] Test windows created successfully\n");
-        serial_puts("[DEMO] Try maximizing both windows to see the difference!\n");
+    if (cb1) wg_set_callback(cb1, checkbox_toggled_callback, NULL);
+    if (cb2) wg_set_callback(cb2, checkbox_toggled_callback, NULL);
+    if (cb3) wg_set_callback(cb3, checkbox_toggled_callback, NULL);
+    
+    current_y += 0.14f;
+    
+    // === ЦЕНТРАЛЬНАЯ КОЛОНКА ===
+    float center_col = 0.36f;
+    current_y = 0.15f;
+    
+    // Слайдеры
+    wg_create_label(win, "Sliders:", center_col, current_y);
+    current_y += 0.03f;
+    
+    wg_create_label(win, "Volume:", center_col, current_y);
+    current_y += 0.02f;
+    Widget* slider1 = wg_create_slider(win, center_col, current_y, 0.25f, 0.03f, 0, 100, 50);
+    if (slider1) wg_set_callback(slider1, slider_changed_callback, NULL);
+    
+    current_y += 0.05f;
+    
+    wg_create_label(win, "Brightness:", center_col, current_y);
+    current_y += 0.02f;
+    Widget* slider2 = wg_create_slider(win, center_col, current_y, 0.25f, 0.03f, 0, 100, 75);
+    if (slider2) wg_set_callback(slider2, slider_changed_callback, NULL);
+    
+    current_y += 0.08f;
+    
+    // Прогресс-бары
+    wg_create_label(win, "Progress:", center_col, current_y);
+    current_y += 0.03f;
+    
+    Widget* progress1 = wg_create_progressbar(win, center_col, current_y, 0.25f, 0.03f, 30);
+    current_y += 0.04f;
+    Widget* progress2 = wg_create_progressbar(win, center_col, current_y, 0.25f, 0.03f, 60);
+    
+    current_y += 0.05f;
+    Widget* update_btn = wg_create_button(win, "Update", center_col, current_y, 0.15f, 0.04f,
+                                         update_progress_callback, progress1);
+    
+    // === ПРАВАЯ КОЛОНКА ===
+    float right_col = 0.70f;
+    current_y = 0.15f;
+    
+    // Список
+    wg_create_label(win, "List:", right_col, current_y);
+    current_y += 0.03f;
+    
+    Widget* list = wg_create_list(win, right_col, current_y, 0.25f, 0.20f, 6);
+    if (list) {
+        wg_list_add_item(list, "Item 1", NULL);
+        wg_list_add_item(list, "Item 2", NULL);
+        wg_list_add_item(list, "Item 3", NULL);
+        wg_list_add_item(list, "Item 4", NULL);
+        wg_list_add_item(list, "Item 5", NULL);
+        wg_list_add_item(list, "Item 6", NULL);
+        wg_list_add_item(list, "Item 7", NULL);
+        wg_list_add_item(list, "Item 8", NULL);
+        wg_list_add_item(list, "Item 9", NULL);
+        wg_list_add_item(list, "Item 10", NULL);
+        wg_list_set_selected(list, 2);
+        list->on_change = list_item_selected_callback;
     }
+    
+    current_y += 0.23f;
+    
+    // Выпадающий список
+    wg_create_label(win, "Dropdown:", right_col, current_y);
+    current_y += 0.03f;
+    
+    Widget* dropdown = wg_create_dropdown(win, right_col, current_y, 0.25f, 0.04f, 5);
+    if (dropdown) {
+        wg_dropdown_add_item(dropdown, "Option A", NULL);
+        wg_dropdown_add_item(dropdown, "Option B", NULL);
+        wg_dropdown_add_item(dropdown, "Option C", NULL);
+        wg_dropdown_add_item(dropdown, "Option D", NULL);
+        wg_dropdown_add_item(dropdown, "Option E", NULL);
+        wg_dropdown_set_selected(dropdown, 0);
+        dropdown->on_change = dropdown_changed_callback;
+    }
+    
+    current_y += 0.07f;
+    
+    // Скроллбар
+    wg_create_label(win, "Scrollbar:", right_col, current_y);
+    current_y += 0.03f;
+    
+    Widget* scroll = wg_create_scrollbar(win, right_col + 0.10f, current_y, 0.03f, 0.12f, 1);
+    if (scroll) {
+        wg_scrollbar_set_range(scroll, 0, 100, 10);
+        wg_scrollbar_set_value(scroll, 30);
+    }
+    
+    // === НИЖНЯЯ ЧАСТЬ ===
+    float bottom_y = 0.70f;
+    
+    // Поля ввода
+    wg_create_label(win, "Text Input:", left_col, bottom_y);
+    
+    Widget* input1 = wg_create_input(win, left_col, bottom_y + 0.04f, 0.30f, 0.04f, "Type here...");
+    if (input1) {
+        input1->can_focus = 1;
+        input1->on_change = input_changed_callback;
+    }
+    
+    Widget* input2 = wg_create_input(win, left_col, bottom_y + 0.09f, 0.30f, 0.04f, "Password");
+    if (input2) {
+        input2->can_focus = 1;
+        InputData* data = (InputData*)input2->data;
+        if (data) data->password_mode = 1;
+        input2->on_change = input_changed_callback;
+    }
+    
+    Widget* input3 = wg_create_input(win, left_col, bottom_y + 0.14f, 0.30f, 0.04f, 
+                                     "Long text for scrolling demo");
+    if (input3) {
+        input3->can_focus = 1;
+        input3->on_change = input_changed_callback;
+    }
+    
+    // Кнопка закрытия
+    Widget* close_btn = wg_create_button(win, "Close Window", 0.70f, 0.85f, 0.25f, 0.05f,
+                                        close_demo_window, win);
+    
+    serial_puts("[DEMO] Showcase window created successfully\n");
+    serial_puts("[DEMO] Press F1 to open this window again\n");
 }
 
-// ============ ОБРАБОТЧИК КЛАВИАТУРЫ ============
+// ============ ОБРАБОТКА ГОРЯЧИХ КЛАВИШ ============
+
 static void handle_keyboard_events(event_t* event) {
     if (!event) return;
     
     if (event->type == EVENT_KEY_PRESS) {
         switch (event->data1) {
-            case 0x3B: // F1 - создать тестовое окно
-                {
-                    static uint32_t counter = 0;
-                    counter++;
-                    
-                    char title[64];
-                    char* ptr = title;
-                    
-                    // Формируем название окна
-                    const char* prefix = "Test Window ";
-                    while (*prefix) *ptr++ = *prefix++;
-                    
-                    // Добавляем номер
-                    uint32_t n = counter;
-                    if (n == 0) *ptr++ = '0';
-                    while (n > 0) {
-                        *ptr++ = '0' + (n % 10);
-                        n /= 10;
-                    }
-                    *ptr = '\0';
-                    
-                    // Переворачиваем цифры
-                    char* start = title + 12; // после "Test Window "
-                    char* end = ptr - 1;
-                    while (start < end) {
-                        char temp = *start;
-                        *start = *end;
-                        *end = temp;
-                        start++;
-                        end--;
-                    }
-                    
-                    // Чередуем типы окон
-                    uint8_t use_relative = (counter % 2 == 0);
-                    
-                    // Создаем окно
-                    Window* win = create_test_window(title,
-                                                  100 + (counter * 30) % 500,
-                                                  80 + (counter * 20) % 300,
-                                                  350 + (counter * 10) % 150,
-                                                  250 + (counter * 10) % 100,
-                                                  use_relative);
-                    
-                    if (win) {
-                        serial_puts("[KEY] F1: Created ");
-                        serial_puts(use_relative ? "relative" : "absolute");
-                        serial_puts(" coordinate window: ");
-                        serial_puts(title);
-                        serial_puts("\n");
-                    }
-                }
+            case 0x3B: // F1 - открыть демо-окно
+                create_showcase_window();
                 break;
                 
-            case 0x01: // ESC - закрыть фокусное окно
-                if (gui_state.focused_window) {
+            case 0x3C: // F2 - дамп информации
+                wm_dump_info();
+                break;
+                
+            case 0x01: // ESC - закрыть фокусированное окно
+                if (gui_state.focused_window && 
+                    IS_VALID_WINDOW_PTR(gui_state.focused_window)) {
                     wm_close_window(gui_state.focused_window);
                 }
                 break;
-
-            case 0x2A: // LSHIFT
-            case 0x36: // RSHIFT
+                
+            case 0x57: // F11 - максимизировать/восстановить
+                if (gui_state.focused_window && 
+                    IS_VALID_WINDOW_PTR(gui_state.focused_window) &&
+                    gui_state.focused_window->maximizable) {
+                    if (gui_state.focused_window->maximized) {
+                        wm_restore_window(gui_state.focused_window);
+                    } else {
+                        wm_maximize_window(gui_state.focused_window);
+                    }
+                }
                 break;
                 
-            case 0x5B: // Виндовс клавиша левая
-            case 0x5C: // Виндовс клавиша правая
+            case 0x0F: // Tab - переключение фокуса
+                if (event->data2 & 0x02) { // Shift нажат
+                    gui_focus_prev();
+                } else {
+                    gui_focus_next();
+                }
+                break;
+                
+            case 0x5B: // Левая Windows
+            case 0x5C: // Правая Windows
                 start_menu_toggle();
                 break;
                 
             default:
-                // Игнорируем другие клавиши
                 break;
         }
     }
 }
 
-// ============ ГЛАВНАЯ ФУНКЦИЯ ============
+// ============ ЯДРО ============
+
 void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
-    // Инициализация системы
     multiboot_dump_info(mb_info);
     memory_init_multiboot(mb_info);
+    extern uint32_t stack_guard;
+    stack_guard = 0xDEADBEEF;
 
     serial_init();
     vga_init();
@@ -377,7 +417,7 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     print_memory_map();
     memory_dump();
     vga_puts("[ OK ] MEMORY ALLOCATION SYSTEM OK\n");
-
+    
     if(!vesa_init(mb_info)) {
         vga_puts("[ERROR] VBE/VESA INITIALISATION FAILED\n");
     } else {
@@ -385,15 +425,8 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     }
     vesa_enable_double_buffer();
 
-    // ===== ПОКАЗЫВАЕМ ЛОГОТИП (ТОЛЬКО FADE-IN) =====
     show_boot_logo();
 
-    // ===== ТЕПЕРЬ ИНИЦИАЛИЗИРУЕМ ВСЁ ОСТАЛЬНОЕ, ОБНОВЛЯЯ ПРОГРЕСС-БАР =====
-    boot_progress = 5;
-    update_boot_progress();
-
-    serial_puts("[INFO] INITIALIZING ATA DRIVER\n");
-    ata_enhanced_init();
     boot_progress = 15;
     update_boot_progress();
 
@@ -408,10 +441,26 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     scanner_dump_all();
     vga_puts("[ OK ] SCANNING HARDWARE FINISH\n");
 
+    boot_progress = 40;
+    update_boot_progress();
+
+    device_init();
+
+    syscall_init();
+
+    //disk_init();
+
+    //ahci_init();
+
+    boot_progress = 50;
+    update_boot_progress();
+
+    scheduler_init();
+    paging_init();
+
     boot_progress = 60;
     update_boot_progress();
 
-    // Графика
     uint32_t screen_width = vesa_get_width();
     uint32_t screen_height = vesa_get_height();
 
@@ -440,23 +489,25 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
 
     vga_puts("[INFO] STARTUP GUI ENVIRONMENT\n");
     gui_init(screen_width, screen_height);
+
     taskbar_init();
-    //create_demo_ui();
+
+    //create_showcase_window();
+    
     vga_puts("[ OK ] GUI ENVIRONMENT OK\n");
 
-    // Информация в serial
     serial_puts("\n=== SYSTEM READY ===\n");
     vga_puts("[INFO] SYSTEMS READY\n");
+    vga_puts("[INFO] Press F1 to open GUI Showcase\n");
 
-    // Первый рендер
     gui_render();
     vesa_cursor_update();
     if (vesa_is_double_buffer_enabled()) {
         vesa_swap_buffers();
     }
 
-    // Главный цикл
     while(system_running) {
+        check_stack_overflow();
         asm volatile("hlt");
 
         event_t event;
@@ -465,27 +516,21 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
             handle_keyboard_events(&event);
         }
 
-        // 1. Сначала скрываем курсор
         vesa_hide_cursor();
 
-        // 2. Обновляем анимацию затемнения
         if (is_shutdown_mode_active()) {
             update_shutdown_animation();
         }
 
-        // 3. Восстанавливаем фон
         if (vesa_is_background_cached()) {
             vesa_restore_background_dirty();
         }
 
-        // 4. Рендерим GUI
         gui_render();
 
-        // 5. ПОКАЗЫВАЕМ КУРСОР ВСЕГДА
         vesa_show_cursor();
         vesa_cursor_update();
 
-        // 6. Обновляем экран
         if (vesa_is_double_buffer_enabled()) {
             vesa_swap_buffers();
         }

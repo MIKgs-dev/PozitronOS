@@ -1445,13 +1445,14 @@ void free(void* ptr) {
 }
 
 void* kmalloc_aligned(uint32_t size, uint32_t align) {
-    void *ptr = kmalloc(size + align + sizeof(void*));
-    if (!ptr) return NULL;
+    uint32_t total = size + align + sizeof(void*);
+    void* raw = kmalloc(total);
+    if (!raw) return NULL;
     
-    uintptr_t raw = (uintptr_t)ptr;
-    uintptr_t aligned = (raw + align - 1) & ~(align - 1);
-    uintptr_t *header = (uintptr_t*)(aligned - sizeof(void*));
-    *header = raw;
+    uintptr_t raw_addr = (uintptr_t)raw;
+    uintptr_t aligned = (raw_addr + align - 1) & ~(align - 1);
+    uintptr_t* header = (uintptr_t*)(aligned - sizeof(void*));
+    *header = raw_addr;
     
     return (void*)aligned;
 }

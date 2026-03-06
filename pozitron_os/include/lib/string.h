@@ -30,4 +30,6 @@ int memcasecmp(const void* ptr1, const void* ptr2, size_t num);
 char* itoa(int value, char* str, int base);
 int atoi(const char* str);
 
+char* strtok(char* str, const char* delim);
+
 #endif // _STRING_H

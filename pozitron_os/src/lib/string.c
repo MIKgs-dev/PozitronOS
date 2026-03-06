@@ -359,3 +359,32 @@ int atoi(const char* str) {
     
     return result * sign;
 }
+
+char* strtok(char* str, const char* delim) {
+    static char* last = NULL;
+    char* start;
+    
+    if (str) last = str;
+    if (!last || *last == '\0') return NULL;
+    
+    // Пропускаем начальные разделители
+    start = last;
+    while (*start && strchr(delim, *start)) start++;
+    if (*start == '\0') {
+        last = NULL;
+        return NULL;
+    }
+    
+    // Ищем конец токена
+    char* end = start;
+    while (*end && !strchr(delim, *end)) end++;
+    
+    if (*end) {
+        *end = '\0';
+        last = end + 1;
+    } else {
+        last = NULL;
+    }
+    
+    return start;
+}

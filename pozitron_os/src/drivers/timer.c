@@ -4,6 +4,8 @@
 #include "drivers/pic.h"
 #include "drivers/serial.h"
 #include "core/event.h"
+#include "kernel/scheduler.h"
+#include "kernel/callout.h"
 
 static uint32_t timer_ticks = 0;
 
@@ -32,9 +34,11 @@ void timer_handler(registers_t* regs) {
     (void)regs;
     
     timer_ticks++;
+
+    callout_process(timer_ticks);
+
+    scheduler_tick();
     
-    // ===== СОБЫТИЕ ТАЙМЕРА =====
-    // Отправляем событие каждые 10 тиков (100ms при 100Hz таймере)
     if (timer_ticks % 10 == 0) {
         event_t event;
         event.type = EVENT_TIMER_TICK;
@@ -43,7 +47,6 @@ void timer_handler(registers_t* regs) {
         event_post(event);
     }
     
-    // Отправляем EOI
     pic_send_eoi(0);
 }
 

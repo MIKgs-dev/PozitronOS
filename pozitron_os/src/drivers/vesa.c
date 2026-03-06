@@ -447,6 +447,7 @@ void vesa_init_dirty(void) {
     serial_puts("[VESA] Dirty rectangles system initialized\n");
 }
 
+// ИСПРАВЛЕННАЯ ФУНКЦИЯ vesa_mark_dirty - с ограничением размера
 void vesa_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (!dirty_system_initialized) return;
     
@@ -455,6 +456,15 @@ void vesa_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (x + w > fb.width) w = fb.width - x;
     if (y + h > fb.height) h = fb.height - y;
     if (w == 0 || h == 0) return;
+    
+    if (w > 200) {
+        x = x + (w - 200) / 2;
+        w = 200;
+    }
+    if (h > 200) {
+        y = y + (h - 200) / 2;
+        h = 200;
+    }
     
     for (uint32_t i = 0; i < dirty_count; i++) {
         dirty_rect_t* r = &dirty_rects[i];
@@ -476,6 +486,9 @@ void vesa_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
             uint32_t new_y = (y < r->y) ? y : r->y;
             uint32_t new_w = ((x + w > r->x + r->w) ? x + w : r->x + r->w) - new_x;
             uint32_t new_h = ((y + h > r->y + r->h) ? y + h : r->y + r->h) - new_y;
+            
+            if (new_w > 200) new_w = 200;
+            if (new_h > 200) new_h = 200;
             
             r->x = new_x; r->y = new_y; r->w = new_w; r->h = new_h;
             return;

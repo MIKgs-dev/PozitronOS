@@ -12,13 +12,20 @@ nasm -f elf32 src/core/isr_asm.asm -o build/isr_asm.o
 nasm -f elf32 src/core/irq_asm.asm -o build/irq_asm.o
 
 echo "Compiling C files..."
-CFLAGS="-m32 -ffreestanding -O1 -Wall -I./include"
+CFLAGS="-m32 -ffreestanding -w -O1 -Wall -I./include"
 
 # Ядро и утилиты
 gcc $CFLAGS -c src/kernel/main.c -o build/main.o
 gcc $CFLAGS -c src/kernel/memory.c -o build/memory.o
 gcc $CFLAGS -c src/kernel/multiboot.c -o build/multiboot.o
 gcc $CFLAGS -c src/kernel/logo.c -o build/logo.o
+gcc $CFLAGS -c src/kernel/scheduler.c -o build/scheduler.o
+gcc $CFLAGS -c src/kernel/paging.c -o build/paging.o
+gcc $CFLAGS -c src/kernel/userspace.c -o build/userspace.o
+gcc $CFLAGS -c src/kernel/device.c -o build/device.o
+gcc $CFLAGS -c src/kernel/callout.c -o build/callout.o
+gcc $CFLAGS -c src/kernel/mutex.c -o build/mutex.o
+gcc $CFLAGS -c src/core/syscall.c -o build/syscall.o
 
 # Драйверы
 gcc $CFLAGS -c src/drivers/serial.c -o build/serial.o
@@ -32,9 +39,10 @@ gcc $CFLAGS -c src/drivers/ports.c -o build/ports.o
 gcc $CFLAGS -c src/drivers/cursor.c -o build/cursor.o
 gcc $CFLAGS -c src/drivers/cmos.c -o build/cmos.o
 gcc $CFLAGS -c src/drivers/power.c -o build/power.o
-gcc $CFLAGS -c src/drivers/ata.c -o build/ata.o
 gcc $CFLAGS -c src/hw/scanner.c -o build/scanner.o
 gcc $CFLAGS -c src/drivers/pci.c -o build/pci.o
+gcc $CFLAGS -c src/drivers/ahci.c -o build/ahci.o
+gcc $CFLAGS -c src/drivers/disk.c -o build/disk.o
 
 # Система
 gcc $CFLAGS -c src/core/event.c -o build/event.o
@@ -51,9 +59,9 @@ gcc $CFLAGS -c src/gui/shutdown.c -o build/shutdown.o
 
 # Библиотеки
 gcc $CFLAGS -c src/lib/string.c -o build/string.o
+gcc $CFLAGS -c src/lib/mini_printf.c -o build/mini_printf.o
 
-# ФС
-gcc $CFLAGS -c src/fs/fat32.c -o build/fat32.o
+gcc $CFLAGS -c src/fs/pfs.c -o build/pfs.o
 
 echo "Linking..."
 ld -m elf_i386 -T linker.ld -o build/kernel.bin \
@@ -62,6 +70,10 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/memory.o \
     build/multiboot.o \
     build/logo.o \
+    build/mutex.o \
+    build/callout.o \
+    build/syscall.o \
+    build/device.o \
     build/gdt.o \
     build/gdt_asm.o \
     build/idt.o \
@@ -76,7 +88,6 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/keyboard.o \
     build/mouse.o \
     build/vesa.o \
-    build/ata.o \
     build/ports.o \
     build/cursor.o \
     build/event.o \
@@ -89,8 +100,14 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/power.o \
     build/shutdown.o \
     build/string.o \
-    build/fat32.o \
     build/pci.o \
+    build/scheduler.o \
+    build/paging.o \
+    build/userspace.o \
+    build/mini_printf.o \
+    build/ahci.o \
+    build/disk.o \
+    build/pfs.o \
     -nostdlib
 
 echo "Creating ISO..."

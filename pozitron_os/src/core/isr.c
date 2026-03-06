@@ -1,6 +1,7 @@
 #include "core/isr.h"
 #include "drivers/vga.h"
 #include "drivers/serial.h"
+#include "kernel/paging.h"
 
 // Массив обработчиков прерываний
 static isr_handler_t interrupt_handlers[256];

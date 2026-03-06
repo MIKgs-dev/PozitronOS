@@ -132,6 +132,7 @@ uint8_t vesa_cursor_is_visible(void);
 void vesa_cursor_enable(uint8_t enable);
 uint8_t vesa_cursor_is_enabled(void);
 void vesa_cursor_get_area(uint32_t* x, uint32_t* y, uint32_t* w, uint32_t* h);
+uint8_t vesa_cursor_needs_update(void);
 
 // Old cursor functions (for compatibility)
 void vesa_draw_cursor(uint32_t x, uint32_t y);
