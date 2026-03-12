@@ -25,7 +25,6 @@ gcc $CFLAGS -c src/kernel/userspace.c -o build/userspace.o
 gcc $CFLAGS -c src/kernel/device.c -o build/device.o
 gcc $CFLAGS -c src/kernel/callout.c -o build/callout.o
 gcc $CFLAGS -c src/kernel/mutex.c -o build/mutex.o
-gcc $CFLAGS -c src/core/syscall.c -o build/syscall.o
 
 # Драйверы
 gcc $CFLAGS -c src/drivers/serial.c -o build/serial.o
@@ -42,7 +41,6 @@ gcc $CFLAGS -c src/drivers/power.c -o build/power.o
 gcc $CFLAGS -c src/hw/scanner.c -o build/scanner.o
 gcc $CFLAGS -c src/drivers/pci.c -o build/pci.o
 gcc $CFLAGS -c src/drivers/ahci.c -o build/ahci.o
-gcc $CFLAGS -c src/drivers/disk.c -o build/disk.o
 
 # Система
 gcc $CFLAGS -c src/core/event.c -o build/event.o
@@ -61,7 +59,13 @@ gcc $CFLAGS -c src/gui/shutdown.c -o build/shutdown.o
 gcc $CFLAGS -c src/lib/string.c -o build/string.o
 gcc $CFLAGS -c src/lib/mini_printf.c -o build/mini_printf.o
 
-gcc $CFLAGS -c src/fs/pfs.c -o build/pfs.o
+# USB
+gcc $CFLAGS -c src/drivers/usb/scsi_cmds.c -o build/scsi_cmds.o
+gcc $CFLAGS -c src/drivers/usb/usb_scsi_low.c -o build/usb_scsi_low.o
+gcc $CFLAGS -c src/drivers/usb/usb.c -o build/usb.o
+gcc $CFLAGS -c src/drivers/usb/uhci.c -o build/uhci.o
+gcc $CFLAGS -c src/drivers/usb/ohci.c -o build/ohci.o
+gcc $CFLAGS -c src/drivers/usb/usb_x.c -o build/usb_x.o
 
 echo "Linking..."
 ld -m elf_i386 -T linker.ld -o build/kernel.bin \
@@ -72,7 +76,6 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/logo.o \
     build/mutex.o \
     build/callout.o \
-    build/syscall.o \
     build/device.o \
     build/gdt.o \
     build/gdt_asm.o \
@@ -106,8 +109,12 @@ ld -m elf_i386 -T linker.ld -o build/kernel.bin \
     build/userspace.o \
     build/mini_printf.o \
     build/ahci.o \
-    build/disk.o \
-    build/pfs.o \
+    build/scsi_cmds.o \
+    build/usb_scsi_low.o \
+    build/usb.o \
+    build/uhci.o \
+    build/ohci.o \
+    build/usb_x.o \
     -nostdlib
 
 echo "Creating ISO..."

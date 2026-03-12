@@ -3,6 +3,11 @@
 #include "drivers/serial.h"
 #include "lib/string.h"
 #include "core/isr.h"
+#include "hw/scanner.h"
+#include "drivers/pci.h"
+
+extern mem_region_t* memory_regions;
+extern uint32_t heap_start;
 
 page_directory_t* current_directory = NULL;
 static page_directory_t* kernel_directory = NULL;
@@ -47,6 +52,43 @@ static uint32_t alloc_frame(void) {
     return FRAME_TO_ADDR(frame);
 }
 
+static uint32_t get_bar_size(int bus, int dev, int func, int index) {
+    uint32_t reg = 0x10 + index * 4;
+    uint32_t original = pci_read32(bus, dev, func, reg);
+    
+    if (original & 1) return 0;
+    if ((original & 0xFFFFFFF0) == 0) return 0;
+    
+    pci_write32(bus, dev, func, reg, 0xFFFFFFFF);
+    uint32_t mask = pci_read32(bus, dev, func, reg);
+    pci_write32(bus, dev, func, reg, original);
+    
+    if (mask == 0) return 0;
+    
+    uint32_t size = (~(mask & 0xFFFFFFF0)) + 1;
+    return size;
+}
+
+void paging_map_page(page_directory_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
+    uint32_t dir_idx = (virt >> 22) & 0x3FF;
+    uint32_t table_idx = (virt >> 12) & 0x3FF;
+    
+    if (!(dir->entries[dir_idx] & PAGE_PRESENT)) {
+        page_table_t* table = (page_table_t*)kmalloc_aligned(sizeof(page_table_t), PAGE_SIZE);
+        if (!table) {
+            serial_puts("[PAGING] CRITICAL: Failed to allocate page table\n");
+            return;
+        }
+        memset(table->entries, 0, sizeof(table->entries));
+        dir->entries[dir_idx] = (uint32_t)table | PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER);
+    }
+    
+    page_table_t* table = (page_table_t*)(dir->entries[dir_idx] & 0xFFFFF000);
+    table->entries[table_idx] = (phys & 0xFFFFF000) | flags | PAGE_PRESENT;
+    
+    asm volatile("invlpg (%0)" : : "r"(virt));
+}
+
 void paging_init(void) {
     memory_info_t mem_info = get_memory_info();
     total_frames = mem_info.total_memory / PAGE_SIZE;
@@ -66,6 +108,7 @@ void paging_init(void) {
     }
     memset(kernel_directory->entries, 0, sizeof(kernel_directory->entries));
     
+    serial_puts("[PAGING] Mapping kernel memory...\n");
     for (uint32_t addr = 0; addr < 0x400000; addr += PAGE_SIZE) {
         uint32_t dir_idx = (addr >> 22) & 0x3FF;
         uint32_t table_idx = (addr >> 12) & 0x3FF;
@@ -87,6 +130,7 @@ void paging_init(void) {
         if (frame < total_frames) set_frame(frame);
     }
     
+    serial_puts("[PAGING] Mapping video memory...\n");
     for (uint32_t addr = 0xA0000; addr < 0xC0000; addr += PAGE_SIZE) {
         uint32_t dir_idx = (addr >> 22) & 0x3FF;
         uint32_t table_idx = (addr >> 12) & 0x3FF;
@@ -111,6 +155,12 @@ void paging_init(void) {
         uint32_t fb_size = fb->height * fb->pitch;
         uint32_t fb_end = fb_start + fb_size;
         
+        serial_puts("[PAGING] Mapping framebuffer: 0x");
+        serial_puts_num_hex(fb_start);
+        serial_puts(" - 0x");
+        serial_puts_num_hex(fb_end);
+        serial_puts("\n");
+        
         for (uint32_t addr = fb_start; addr < fb_end; addr += PAGE_SIZE) {
             uint32_t dir_idx = (addr >> 22) & 0x3FF;
             uint32_t table_idx = (addr >> 12) & 0x3FF;
@@ -130,10 +180,177 @@ void paging_init(void) {
         }
     }
     
+    // Маппим кучу (heap)
+    extern uint32_t heap_start;
+    uint32_t heap_phys = (uint32_t)heap_start & 0xFFFFF000;
+    uint32_t heap_end = ((uint32_t)heap_start + mem_info.heap_size + PAGE_SIZE - 1) & 0xFFFFF000;
+    
+    serial_puts("[PAGING] Mapping heap: 0x");
+    serial_puts_num_hex(heap_phys);
+    serial_puts(" - 0x");
+    serial_puts_num_hex(heap_end);
+    serial_puts("\n");
+    
+    for (uint32_t addr = heap_phys; addr < heap_end; addr += PAGE_SIZE) {
+        uint32_t dir_idx = (addr >> 22) & 0x3FF;
+        uint32_t table_idx = (addr >> 12) & 0x3FF;
+        
+        if (!(kernel_directory->entries[dir_idx] & PAGE_PRESENT)) {
+            page_table_t* table = (page_table_t*)kmalloc_aligned(sizeof(page_table_t), PAGE_SIZE);
+            if (!table) {
+                serial_puts("[PAGING] Failed to allocate page table for heap\n");
+                return;
+            }
+            memset(table->entries, 0, sizeof(table->entries));
+            kernel_directory->entries[dir_idx] = (uint32_t)table | PAGE_PRESENT | PAGE_WRITABLE;
+        }
+        
+        page_table_t* table = (page_table_t*)(kernel_directory->entries[dir_idx] & 0xFFFFF000);
+        table->entries[table_idx] = addr | PAGE_PRESENT | PAGE_WRITABLE;
+    }
+    
+    serial_puts("[PAGING] Mapping fixed MMIO regions...\n");
+    
+    struct {
+        uint32_t start;
+        uint32_t end;
+        const char* name;
+    } fixed_mmio[] = {
+        {0xFEC00000, 0xFEC01000, "APIC 1"},
+        {0xFEE00000, 0xFEE01000, "APIC 2"},
+        {0xFFFC0000, 0xFFFFFFFF, "BIOS ROM"},
+    };
+    
+    uint32_t mmio_flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_CACHE_DISABLE | PAGE_WRITETHROUGH;
+    
+    for (int i = 0; i < sizeof(fixed_mmio)/sizeof(fixed_mmio[0]); i++) {
+        uint32_t start = fixed_mmio[i].start & 0xFFFFF000;
+        uint32_t end = (fixed_mmio[i].end + PAGE_SIZE - 1) & 0xFFFFF000;
+        
+        serial_puts("[PAGING]   ");
+        serial_puts(fixed_mmio[i].name);
+        serial_puts(": 0x");
+        serial_puts_num_hex(start);
+        serial_puts(" - 0x");
+        serial_puts_num_hex(end);
+        serial_puts("\n");
+        
+        for (uint32_t addr = start; addr < end; addr += PAGE_SIZE) {
+            paging_map_page(kernel_directory, addr, addr, mmio_flags);
+        }
+    }
+    
+    if (memory_regions) {
+        serial_puts("[PAGING] Scanning memory regions for reserved MMIO...\n");
+        mem_region_t* region = memory_regions;
+        while (region) {
+            if (region->type != MEMORY_TYPE_AVAILABLE && region->base >= 0xC0000000) {
+                uint32_t start = region->base & 0xFFFFF000;
+                uint32_t end = (region->base + region->size + PAGE_SIZE - 1) & 0xFFFFF000;
+                
+                serial_puts("[PAGING]   Reserved region: 0x");
+                serial_puts_num_hex(start);
+                serial_puts(" - 0x");
+                serial_puts_num_hex(end);
+                serial_puts("\n");
+                
+                for (uint32_t addr = start; addr < end; addr += PAGE_SIZE) {
+                    paging_map_page(kernel_directory, addr, addr, mmio_flags);
+                }
+            }
+            region = region->next;
+        }
+    }
+    
+    serial_puts("[PAGING] Mapping PCI device BARs...\n");
+    hw_device_t* dev = scanner_get_device_list();
+    
+    while (dev) {
+        if (dev->bus == BUS_PCI) {
+            for (int i = 0; i < 6; i++) {
+                uint32_t new_bar = pci_read32(dev->pci.bus, dev->pci.device, 
+                                             dev->pci.function, 0x10 + i * 4);
+                if (new_bar != dev->pci.bars[i]) {
+                    serial_puts("[PAGING]   BAR");
+                    serial_puts_num(i);
+                    serial_puts(" changed: 0x");
+                    serial_puts_num_hex(dev->pci.bars[i]);
+                    serial_puts(" -> 0x");
+                    serial_puts_num_hex(new_bar);
+                    serial_puts("\n");
+                    dev->pci.bars[i] = new_bar;
+                }
+            }
+        }
+        dev = dev->next;
+    }
+    
+    dev = scanner_get_device_list();
+    int bar_count = 0;
+    uint32_t total_mapped = 0;
+    
+    while (dev) {
+        if (dev->bus == BUS_PCI) {
+            for (int i = 0; i < 6; i++) {
+                uint32_t bar = dev->pci.bars[i];
+                if (bar && !(bar & 1)) {
+                    uint32_t base = bar & 0xFFFFFFF0;
+                    if (base == 0) continue;
+                    
+                    uint32_t size = get_bar_size(dev->pci.bus, dev->pci.device, 
+                                                 dev->pci.function, i);
+                    if (size == 0 || size > 0x10000000) {
+                        serial_puts("[PAGING]   WARNING: Suspicious BAR size ");
+                        serial_puts_num_hex(size);
+                        serial_puts(", limiting to 4KB\n");
+                        size = 0x1000;
+                    }
+                    
+                    uint32_t end = base + size;
+                    uint32_t start_page = base & 0xFFFFF000;
+                    uint32_t end_page = (end + PAGE_SIZE - 1) & 0xFFFFF000;
+                    
+                    serial_puts("[PAGING]   ");
+                    serial_puts(dev->name);
+                    serial_puts(" BAR");
+                    serial_puts_num(i);
+                    serial_puts(": 0x");
+                    serial_puts_num_hex(start_page);
+                    serial_puts(" - 0x");
+                    serial_puts_num_hex(end_page);
+                    serial_puts(" (");
+                    serial_puts_num(size / 1024);
+                    serial_puts(" KB)\n");
+                    
+                    for (uint32_t addr = start_page; addr < end_page; addr += PAGE_SIZE) {
+                        paging_map_page(kernel_directory, addr, addr, mmio_flags);
+                        total_mapped++;
+                    }
+                    bar_count++;
+                }
+            }
+        }
+        dev = dev->next;
+    }
+    
+    serial_puts("[PAGING] Mapped ");
+    serial_puts_num(bar_count);
+    serial_puts(" PCI BARs (");
+    serial_puts_num(total_mapped);
+    serial_puts(" pages)\n");
+    
     current_directory = kernel_directory;
     asm volatile("mov %0, %%cr3" : : "r"(current_directory));
     
-    serial_puts("[PAGING] Initialized\n");
+    uint32_t cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= 0x80000000;
+    asm volatile("mov %0, %%cr0" : : "r"(cr0));
+    
+    extern void memory_paging_activated(void);
+    memory_paging_activated();
+    
+    serial_puts("[PAGING] Initialized and enabled\n");
 }
 
 page_directory_t* paging_create_directory(void) {
@@ -149,23 +366,6 @@ void paging_switch_directory(page_directory_t* dir) {
     asm volatile("mov %0, %%cr3" : : "r"(dir));
 }
 
-void paging_map_page(page_directory_t* dir, uint32_t virt, uint32_t phys, uint32_t flags) {
-    uint32_t dir_idx = (virt >> 22) & 0x3FF;
-    uint32_t table_idx = (virt >> 12) & 0x3FF;
-    
-    if (!(dir->entries[dir_idx] & PAGE_PRESENT)) {
-        page_table_t* table = (page_table_t*)kmalloc_aligned(sizeof(page_table_t), PAGE_SIZE);
-        if (!table) return;
-        memset(table->entries, 0, sizeof(table->entries));
-        dir->entries[dir_idx] = (uint32_t)table | PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER);
-    }
-    
-    page_table_t* table = (page_table_t*)(dir->entries[dir_idx] & 0xFFFFF000);
-    table->entries[table_idx] = (phys & 0xFFFFF000) | flags | PAGE_PRESENT;
-    
-    asm volatile("invlpg (%0)" : : "r"(virt));
-}
-
 void paging_unmap_page(page_directory_t* dir, uint32_t virt) {
     uint32_t dir_idx = (virt >> 22) & 0x3FF;
     uint32_t table_idx = (virt >> 12) & 0x3FF;
@@ -179,6 +379,8 @@ void paging_unmap_page(page_directory_t* dir, uint32_t virt) {
 }
 
 uint32_t paging_get_physical(page_directory_t* dir, uint32_t virt) {
+    if (!dir) return virt;
+    
     uint32_t dir_idx = (virt >> 22) & 0x3FF;
     uint32_t table_idx = (virt >> 12) & 0x3FF;
     
@@ -208,8 +410,35 @@ void page_fault_handler(registers_t* r) {
     if (r->err_code & 0x4) serial_puts("  User mode\n");
     else serial_puts("  Supervisor mode\n");
     
-    serial_puts("System halted.\n");
+    // Проверяем, не в AHCI ли BAR случился fault
+    if (fault_addr >= 0xE1004000 && fault_addr < 0xE1006000) {
+        serial_puts("\n*** AHCI BAR FAULT DETECTED ***\n");
+        serial_puts("Checking page tables...\n");
+        
+        uint32_t dir_idx = (fault_addr >> 22) & 0x3FF;
+        uint32_t table_idx = (fault_addr >> 12) & 0x3FF;
+        
+        uint32_t dir_entry = current_directory->entries[dir_idx];
+        serial_puts("Directory entry: 0x"); serial_puts_num_hex(dir_entry); serial_puts("\n");
+        
+        if (dir_entry & PAGE_PRESENT) {
+            page_table_t* table = (page_table_t*)(dir_entry & 0xFFFFF000);
+            uint32_t table_entry = table->entries[table_idx];
+            serial_puts("Table entry: 0x"); serial_puts_num_hex(table_entry); serial_puts("\n");
+            
+            if (table_entry & PAGE_PRESENT) {
+                serial_puts("  Page PRESENT!\n");
+                if (!(table_entry & PAGE_CACHE_DISABLE)) {
+                    serial_puts("  CACHE ENABLED! This is the problem\n");
+                }
+                if (!(table_entry & PAGE_WRITETHROUGH)) {
+                    serial_puts("  WRITE-THROUGH disabled\n");
+                }
+            }
+        }
+    }
     
+    serial_puts("\nSystem halted.\n");
     asm volatile("cli; hlt");
     for(;;);
 }

@@ -117,3 +117,55 @@ int sprintf(char* str, const char* format, ...) {
     va_end(args);
     return out - str;
 }
+
+int vsprintf(char* buf, const char* fmt, va_list args) {
+    char* out = buf;
+    
+    for (const char* p = fmt; *p; p++) {
+        if (*p != '%') {
+            *out++ = *p;
+            continue;
+        }
+        
+        p++; // переходим после %
+        
+        switch (*p) {
+            case 'd': {
+                int value = va_arg(args, int);
+                print_int(&out, value);
+                break;
+            }
+            case 'u': {
+                unsigned int value = va_arg(args, unsigned int);
+                print_int(&out, (int)value);
+                break;
+            }
+            case 'x': {
+                unsigned int value = va_arg(args, unsigned int);
+                print_hex(&out, value);
+                break;
+            }
+            case 's': {
+                const char* s = va_arg(args, const char*);
+                print_string(&out, s);
+                break;
+            }
+            case 'c': {
+                char c = (char)va_arg(args, int);
+                *out++ = c;
+                break;
+            }
+            case '%': {
+                *out++ = '%';
+                break;
+            }
+            default:
+                *out++ = '%';
+                *out++ = *p;
+                break;
+        }
+    }
+    
+    *out = '\0';
+    return out - buf;
+}

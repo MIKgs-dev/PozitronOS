@@ -17,16 +17,15 @@
 #include "gui/shutdown.h"
 #include "kernel/multiboot_util.h"
 #include "kernel/logo.h"
-#include <stddef.h>
+#include "stddef.h"
 #include "lib/string.h"
 #include "kernel/scheduler.h"
 #include "kernel/paging.h"
 #include "kernel/userspace.h"
-#include "drivers/ahci.h"
 #include "kernel/device.h"
-#include "fs/pfs.h"
-#include "drivers/disk.h"
-#include "core/syscall.h"
+#include "drivers/usb/usb.h"
+#include "drivers/usb/scsi_cmds.h"
+#include "drivers/ahci.h"
 
 static uint8_t system_running = 1;
 
@@ -36,8 +35,6 @@ static uint8_t system_running = 1;
 #define EVENT_UNPACK_BUTTON(data) (((data) >> 24) & 0xFF)
 
 extern void check_stack_overflow(void);
-
-// ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ДЕМО ============
 
 static void update_progress_callback(Widget* button, void* userdata) {
     if (!button || !userdata) return;
@@ -131,8 +128,6 @@ static void input_changed_callback(Widget* input, void* userdata) {
     serial_puts("\n");
 }
 
-// ============ СОЗДАНИЕ ДЕМОНСТРАЦИОННОГО ОКНА ============
-
 static void create_showcase_window(void) {
     serial_puts("\n=== CREATING GUI SHOWCASE WINDOW ===\n");
     
@@ -155,8 +150,7 @@ static void create_showcase_window(void) {
         return;
     }
     
-    // === МЕНЮ-БАР (сдвинут вниз, чтобы не перекрывать заголовок) ===
-    Widget* menubar = wg_create_menubar(win, 0.0f, 0.05f, 1.0f);  // 5% от верхнего края
+    Widget* menubar = wg_create_menubar(win, 0.0f, 0.05f, 1.0f);
     if (menubar) {
         uint32_t file_menu = wg_menubar_add_menu(menubar, "File");
         uint32_t edit_menu = wg_menubar_add_menu(menubar, "Edit");
@@ -183,13 +177,11 @@ static void create_showcase_window(void) {
         wg_menubar_add_item(menubar, help_menu, "Documentation", menubar_item_callback, "Docs");
     }
     
-    // === ЛЕВАЯ КОЛОНКА ===
     float left_col = 0.03f;
     float col_width = 0.30f;
     float row_height = 0.06f;
-    float current_y = 0.15f;  // Начинаем ниже меню-бара
+    float current_y = 0.15f;
     
-    // Кнопки
     wg_create_label(win, "Buttons:", left_col, current_y);
     current_y += 0.03f;
     
@@ -199,7 +191,6 @@ static void create_showcase_window(void) {
     
     current_y += 0.06f;
     
-    // Чекбоксы
     wg_create_label(win, "Checkboxes:", left_col, current_y);
     current_y += 0.03f;
     
@@ -213,11 +204,9 @@ static void create_showcase_window(void) {
     
     current_y += 0.14f;
     
-    // === ЦЕНТРАЛЬНАЯ КОЛОНКА ===
     float center_col = 0.36f;
     current_y = 0.15f;
     
-    // Слайдеры
     wg_create_label(win, "Sliders:", center_col, current_y);
     current_y += 0.03f;
     
@@ -235,7 +224,6 @@ static void create_showcase_window(void) {
     
     current_y += 0.08f;
     
-    // Прогресс-бары
     wg_create_label(win, "Progress:", center_col, current_y);
     current_y += 0.03f;
     
@@ -247,11 +235,9 @@ static void create_showcase_window(void) {
     Widget* update_btn = wg_create_button(win, "Update", center_col, current_y, 0.15f, 0.04f,
                                          update_progress_callback, progress1);
     
-    // === ПРАВАЯ КОЛОНКА ===
     float right_col = 0.70f;
     current_y = 0.15f;
     
-    // Список
     wg_create_label(win, "List:", right_col, current_y);
     current_y += 0.03f;
     
@@ -273,7 +259,6 @@ static void create_showcase_window(void) {
     
     current_y += 0.23f;
     
-    // Выпадающий список
     wg_create_label(win, "Dropdown:", right_col, current_y);
     current_y += 0.03f;
     
@@ -290,7 +275,6 @@ static void create_showcase_window(void) {
     
     current_y += 0.07f;
     
-    // Скроллбар
     wg_create_label(win, "Scrollbar:", right_col, current_y);
     current_y += 0.03f;
     
@@ -300,10 +284,8 @@ static void create_showcase_window(void) {
         wg_scrollbar_set_value(scroll, 30);
     }
     
-    // === НИЖНЯЯ ЧАСТЬ ===
     float bottom_y = 0.70f;
     
-    // Поля ввода
     wg_create_label(win, "Text Input:", left_col, bottom_y);
     
     Widget* input1 = wg_create_input(win, left_col, bottom_y + 0.04f, 0.30f, 0.04f, "Type here...");
@@ -327,7 +309,6 @@ static void create_showcase_window(void) {
         input3->on_change = input_changed_callback;
     }
     
-    // Кнопка закрытия
     Widget* close_btn = wg_create_button(win, "Close Window", 0.70f, 0.85f, 0.25f, 0.05f,
                                         close_demo_window, win);
     
@@ -335,29 +316,27 @@ static void create_showcase_window(void) {
     serial_puts("[DEMO] Press F1 to open this window again\n");
 }
 
-// ============ ОБРАБОТКА ГОРЯЧИХ КЛАВИШ ============
-
 static void handle_keyboard_events(event_t* event) {
     if (!event) return;
     
     if (event->type == EVENT_KEY_PRESS) {
         switch (event->data1) {
-            case 0x3B: // F1 - открыть демо-окно
+            case 0x3B:
                 create_showcase_window();
                 break;
                 
-            case 0x3C: // F2 - дамп информации
+            case 0x3C:
                 wm_dump_info();
                 break;
                 
-            case 0x01: // ESC - закрыть фокусированное окно
+            case 0x01:
                 if (gui_state.focused_window && 
                     IS_VALID_WINDOW_PTR(gui_state.focused_window)) {
                     wm_close_window(gui_state.focused_window);
                 }
                 break;
                 
-            case 0x57: // F11 - максимизировать/восстановить
+            case 0x57:
                 if (gui_state.focused_window && 
                     IS_VALID_WINDOW_PTR(gui_state.focused_window) &&
                     gui_state.focused_window->maximizable) {
@@ -369,16 +348,16 @@ static void handle_keyboard_events(event_t* event) {
                 }
                 break;
                 
-            case 0x0F: // Tab - переключение фокуса
-                if (event->data2 & 0x02) { // Shift нажат
+            case 0x0F:
+                if (event->data2 & 0x02) {
                     gui_focus_prev();
                 } else {
                     gui_focus_next();
                 }
                 break;
                 
-            case 0x5B: // Левая Windows
-            case 0x5C: // Правая Windows
+            case 0x5B:
+            case 0x5C:
                 start_menu_toggle();
                 break;
                 
@@ -387,8 +366,6 @@ static void handle_keyboard_events(event_t* event) {
         }
     }
 }
-
-// ============ ЯДРО ============
 
 void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     multiboot_dump_info(mb_info);
@@ -413,6 +390,7 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     timer_init(100);
     vga_puts("[ OK ] TIMER OK\n");
     keyboard_init();
+    
     memory_init();
     print_memory_map();
     memory_dump();
@@ -426,7 +404,6 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
     vesa_enable_double_buffer();
 
     show_boot_logo();
-
     boot_progress = 15;
     update_boot_progress();
 
@@ -446,17 +423,18 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
 
     device_init();
 
-    syscall_init();
-
-    //disk_init();
-
-    //ahci_init();
-
+    init_devices();
+    hci_init();
+    poll_usb();
+    
     boot_progress = 50;
     update_boot_progress();
 
-    scheduler_init();
     paging_init();
+
+    scheduler_init();
+
+    ahci_init();
 
     boot_progress = 60;
     update_boot_progress();
@@ -492,13 +470,10 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
 
     taskbar_init();
 
-    //create_showcase_window();
-    
     vga_puts("[ OK ] GUI ENVIRONMENT OK\n");
 
     serial_puts("\n=== SYSTEM READY ===\n");
     vga_puts("[INFO] SYSTEMS READY\n");
-    vga_puts("[INFO] Press F1 to open GUI Showcase\n");
 
     gui_render();
     vesa_cursor_update();
@@ -515,6 +490,8 @@ void kernel_main(uint32_t magic, multiboot_info_t* mb_info) {
             gui_handle_event(&event);
             handle_keyboard_events(&event);
         }
+
+        poll_usb();
 
         vesa_hide_cursor();
 

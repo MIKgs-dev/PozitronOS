@@ -4,43 +4,32 @@
 #include <stddef.h>
 #include "lib/string.h"
 
-// === Глобальные переменные ===
-
 #if USE_ADVANCED_ALLOCATOR
-// Для нового аллокатора
-static mem_block_t* heap_start = NULL;
-static mem_block_t* heap_end = NULL;
-static uint32_t heap_total_size = 0;
-static uint32_t heap_initialized = 0;
+mem_block_t* heap_start = NULL;
+mem_block_t* heap_end = NULL;
+uint32_t heap_total_size = 0;
+uint32_t heap_initialized = 0;
 
-// ММАП информация
-static mem_region_t* memory_regions = NULL;
+mem_region_t* memory_regions = NULL;
 static mem_region_t* heap_region = NULL;
 static memory_info_t mem_info = {0};
-
-// Информация о ядре
 static kernel_info_t kernel_info = {0};
 
-// Зарезервированные области (используем статический массив для простоты)
 #define MAX_RESERVED_AREAS 32
 static reserved_area_t reserved_areas[MAX_RESERVED_AREAS];
 static uint32_t reserved_areas_count = 0;
 
-// Временная память для структур регионов (используем статический массив)
 #define MAX_MEM_REGIONS 64
 static mem_region_t mem_regions_buffer[MAX_MEM_REGIONS];
 static uint32_t mem_regions_count = 0;
 
+static int paging_active = 0;
+
 #else
-// Для старого аллокатора
 static uint8_t heap[HEAP_SIZE];
 static uint8_t heap_used[HEAP_SIZE / BLOCK_SIZE] = {0};
 #endif
 
-// === Вспомогательные функции для нового аллокатора ===
-#if USE_ADVANCED_ALLOCATOR
-
-// Безопасное копирование строк
 static void safe_strcpy(char* dest, const char* src, size_t max_len) {
     size_t i;
     for (i = 0; i < max_len - 1 && src[i] != '\0'; i++) {
@@ -49,10 +38,9 @@ static void safe_strcpy(char* dest, const char* src, size_t max_len) {
     dest[i] = '\0';
 }
 
-// Определение границ ядра
 static void detect_kernel_bounds(void) {
-    extern uint8_t _start;  // Начало ядра из boot.asm
-    extern uint8_t end;     // Конец ядра
+    extern uint8_t _start;
+    extern uint8_t end;
     
     kernel_info.start = (uint32_t)&_start;
     kernel_info.end = (uint32_t)&end;
@@ -67,7 +55,6 @@ static void detect_kernel_bounds(void) {
     serial_puts(" KB)\n");
 }
 
-// Добавление зарезервированной области
 static void add_reserved_area(uint32_t start, uint32_t end, const char* description) {
     if (reserved_areas_count >= MAX_RESERVED_AREAS) {
         serial_puts("[MEM] WARNING: Too many reserved areas\n");
@@ -78,29 +65,10 @@ static void add_reserved_area(uint32_t start, uint32_t end, const char* descript
     area->start = start;
     area->end = end;
     area->description = description;
-    
-    // Простой вывод для отладки
-    serial_puts("[MEM] Reserved: ");
-    if (description) {
-        const char* p = description;
-        while (*p && *p >= 32 && *p <= 126) {
-            serial_write(*p);
-            p++;
-        }
-    }
-    serial_puts(" (0x");
-    serial_puts_num_hex(start);
-    serial_puts(" - 0x");
-    serial_puts_num_hex(end);
-    serial_puts(")\n");
 }
 
-// Инициализация известных зарезервированных областей
 static void init_reserved_areas(void) {
-    // Добавляем само ядро
     add_reserved_area(kernel_info.start, kernel_info.end, "Kernel");
-    
-    // Известные системные области (стандартные для PC)
     add_reserved_area(0x00000000, 0x00000500, "Interrupt Vector Table");
     add_reserved_area(0x00000500, 0x00007BFF, "BIOS Data Area");
     add_reserved_area(0x00007C00, 0x00007DFF, "MBR/Boot Sector");
@@ -116,34 +84,16 @@ static void init_reserved_areas(void) {
     serial_puts(" areas\n");
 }
 
-// Проверка пересечения с зарезервированными областями
 static uint8_t check_area_overlap(uint32_t start, uint32_t end) {
     for (uint32_t i = 0; i < reserved_areas_count; i++) {
         reserved_area_t* area = &reserved_areas[i];
-        
-        // Проверяем пересечение: если не (end <= area->start || start >= area->end)
         if (!(end <= area->start || start >= area->end)) {
-            serial_puts("[MEM] Overlap detected with ");
-            if (area->description) {
-                const char* p = area->description;
-                while (*p && *p >= 32 && *p <= 126) {
-                    serial_write(*p);
-                    p++;
-                }
-            }
-            serial_puts(" (0x");
-            serial_puts_num_hex(area->start);
-            serial_puts(" - 0x");
-            serial_puts_num_hex(area->end);
-            serial_puts(")\n");
-            return 1; // Есть пересечение
+            return 1;
         }
     }
-    
-    return 0; // Нет пересечений
+    return 0;
 }
 
-// Парсинг карты памяти
 void parse_memory_map(multiboot_info_t* mb_info) {
     if (!mb_info || !(mb_info->flags & (1 << 6))) {
         serial_puts("[MEM] No memory map available\n");
@@ -162,10 +112,10 @@ void parse_memory_map(multiboot_info_t* mb_info) {
     
     uint64_t total_memory = 0;
     uint64_t available_memory = 0;
+    uint64_t dma_memory = 0;
     uint64_t largest_block = 0;
     mem_regions_count = 0;
     
-    // Парсим каждую запись
     while (mmap_addr < original_mmap_end && mem_regions_count < MAX_MEM_REGIONS) {
         memory_map_entry_t* entry = (memory_map_entry_t*)mmap_addr;
         
@@ -173,22 +123,16 @@ void parse_memory_map(multiboot_info_t* mb_info) {
         uint64_t length = ((uint64_t)entry->length_high << 32) | entry->length_low;
         uint32_t type = entry->type;
         
-        // Проверяем на переполнение
         if (base + length < base || length == 0) {
-            mmap_addr += entry->size + sizeof(entry->size);
-            continue;  // Пропускаем, не добавляем!
-        }
-        
-        // Проверяем нулевую длину
-        if (length == 0) {
-            serial_puts("  Region ");
-            serial_puts_num(mem_regions_count + 1);
-            serial_puts(": INVALID - ZERO LENGTH\n");
             mmap_addr += entry->size + sizeof(entry->size);
             continue;
         }
         
-        // Сохраняем регион в буфер
+        if (length == 0) {
+            mmap_addr += entry->size + sizeof(entry->size);
+            continue;
+        }
+        
         mem_region_t* region = &mem_regions_buffer[mem_regions_count];
         mem_regions_count++;
         
@@ -196,9 +140,9 @@ void parse_memory_map(multiboot_info_t* mb_info) {
         region->size = (uint32_t)length;
         region->type = (uint8_t)type;
         region->used = 0;
+        region->dma_capable = (base + length <= DMA_ZONE_LIMIT) ? 1 : 0;
         region->next = NULL;
         
-        // Добавляем в связанный список
         if (!memory_regions) {
             memory_regions = region;
         } else {
@@ -207,7 +151,6 @@ void parse_memory_map(multiboot_info_t* mb_info) {
             last->next = region;
         }
         
-        // Добавляем зарезервированные области в список
         if (type != MEMORY_TYPE_AVAILABLE) {
             char desc[32];
             switch(type) {
@@ -233,37 +176,20 @@ void parse_memory_map(multiboot_info_t* mb_info) {
         
         if (type == MEMORY_TYPE_AVAILABLE) {
             available_memory += length;
+            if (region->dma_capable) {
+                dma_memory += length;
+            }
             if (length > largest_block) {
                 largest_block = length;
             }
         }
         
-        // Вывод информации о регионе
-        serial_puts("  Region ");
-        serial_puts_num(mem_regions_count);
-        serial_puts(": 0x");
-        serial_puts_num_hex((uint32_t)base);
-        serial_puts(" - 0x");
-        serial_puts_num_hex((uint32_t)(base + length));
-        serial_puts(" (");
-        serial_puts_num(length / 1024);
-        serial_puts(" KB) Type=");
-        serial_puts_num(type);
-        
-        if (type == MEMORY_TYPE_AVAILABLE) {
-            serial_puts(" (Available)");
-        } else {
-            serial_puts(" (Reserved)");
-        }
-        serial_puts("\n");
-        
-        // Переход к следующей записи
         mmap_addr += entry->size + sizeof(entry->size);
     }
     
-    // Сохраняем информацию
     mem_info.total_memory = (uint32_t)total_memory;
     mem_info.available_memory = (uint32_t)available_memory;
+    mem_info.dma_memory = (uint32_t)dma_memory;
     mem_info.largest_block = (uint32_t)largest_block;
     mem_info.region_count = mem_regions_count;
     
@@ -271,12 +197,11 @@ void parse_memory_map(multiboot_info_t* mb_info) {
     serial_puts_num(mem_regions_count);
     serial_puts(" regions, ");
     serial_puts_num(available_memory / (1024 * 1024));
-    serial_puts(" MB available, largest block: ");
-    serial_puts_num(largest_block / (1024 * 1024));
+    serial_puts(" MB available, DMA: ");
+    serial_puts_num(dma_memory / (1024 * 1024));
     serial_puts(" MB\n");
 }
 
-// Вывод карты памяти
 void print_memory_map(void) {
     serial_puts("\n=== DETAILED MEMORY MAP ===\n");
     
@@ -303,7 +228,11 @@ void print_memory_map(void) {
         serial_puts_num(region->size / 1024);
         serial_puts(" KB, ");
         serial_puts_num(region->size / (1024 * 1024));
-        serial_puts(" MB) Type=");
+        serial_puts(" MB) ");
+        
+        if (region->dma_capable) {
+            serial_puts("[DMA] ");
+        }
         
         switch(region->type) {
             case MEMORY_TYPE_AVAILABLE:
@@ -346,6 +275,10 @@ void print_memory_map(void) {
     serial_puts_num((uint32_t)(total_available / (1024 * 1024)));
     serial_puts(" MB\n");
     
+    serial_puts("DMA-safe:  ");
+    serial_puts_num((uint32_t)(mem_info.dma_memory / (1024 * 1024)));
+    serial_puts(" MB\n");
+    
     serial_puts("Reserved:  ");
     serial_puts_num((uint32_t)(total_reserved / (1024 * 1024)));
     serial_puts(" MB\n");
@@ -354,43 +287,21 @@ void print_memory_map(void) {
     serial_puts("Total:     ");
     serial_puts_num((uint32_t)(total_memory / (1024 * 1024)));
     serial_puts(" MB\n");
-    
-    serial_puts("\n=== RESERVED AREAS ===\n");
-    for (uint32_t i = 0; i < reserved_areas_count; i++) {
-        serial_puts("0x");
-        serial_puts_num_hex(reserved_areas[i].start);
-        serial_puts(" - 0x");
-        serial_puts_num_hex(reserved_areas[i].end);
-        serial_puts(": ");
-        
-        // Безопасный вывод описания
-        const char* desc = reserved_areas[i].description;
-        if (desc) {
-            while (*desc && *desc >= 32 && *desc <= 126) {
-                serial_write(*desc);
-                desc++;
-            }
-        }
-        serial_puts("\n");
-    }
-    
     serial_puts("===========================\n");
 }
 
-// Поиск лучшего региона для кучи
 static heap_config_t find_best_heap_region(void) {
     heap_config_t config = {0};
-    config.min_size = 16 * 1024 * 1024;   // Минимум 16MB
-    config.max_size = 1024 * 1024 * 1024; // Максимум 1GB для 32-бит системы
+    config.min_size = 16 * 1024 * 1024;
+    config.max_size = 1024 * 1024 * 1024;
     
     serial_puts("[MEM] Searching for heap region...\n");
     
-    // Собираем информацию о всех подходящих регионах
     typedef struct {
         uint32_t start;
         uint32_t size;
         uint32_t score;
-        uint8_t is_high_mem; // 1 = выше 4GB (для PAE/64-bit)
+        uint8_t dma_safe;
     } candidate_t;
     
     candidate_t candidates[16];
@@ -403,82 +314,52 @@ static heap_config_t find_best_heap_region(void) {
             uint32_t region_start = region->base;
             uint32_t region_size = region->size;
             
-            // Пропускаем слишком маленькие регионы
             if (region_size < config.min_size) {
                 region = region->next;
                 continue;
             }
             
-            // Пропускаем регионы ниже 1MB (там загрузчик и т.д.)
             if (region_start + region_size <= 0x100000) {
                 region = region->next;
                 continue;
             }
             
-            // Вычисляем потенциальный старт кучи
             uint32_t heap_start = PAGE_ALIGN(region_start);
             
-            // Если регион начинается до 16MB, начинаем с 16MB
             if (heap_start < 0x1000000) {
                 heap_start = 0x1000000;
             }
             
-            // Вычисляем доступный размер
             uint32_t available_size = (region_start + region_size) - heap_start;
             
-            // Пропускаем если после выравнивания слишком мало
             if (available_size < config.min_size) {
                 region = region->next;
                 continue;
             }
             
-            // Берем разумный размер (не весь регион, оставляем запас)
             uint32_t heap_size = available_size;
             
-            // Для очень больших регионов (>2GB) берем 75%
             if (heap_size > (2UL * 1024 * 1024 * 1024)) {
                 heap_size = heap_size * 3 / 4;
             }
             
-            // Выравниваем
             heap_size = heap_size & ~(PAGE_SIZE - 1);
             
-            // Проверяем минимальный размер
             if (heap_size >= config.min_size) {
-                // Проверяем пересечения
                 if (!check_area_overlap(heap_start, heap_start + heap_size)) {
-                    // Вычисляем score
                     uint32_t score = heap_size;
                     
-                    // Бонусы:
-                    // 1. Регионы выше 128MB получают бонус
                     if (heap_start > 0x8000000) score += 50 * 1024 * 1024;
-                    
-                    // 2. Регионы выше 1GB получают большой бонус
                     if (heap_start > 0x40000000) score += 200 * 1024 * 1024;
                     
-                    // 3. Большие регионы получают дополнительный бонус
                     if (heap_size > (256 * 1024 * 1024)) {
                         score += (heap_size / (256 * 1024 * 1024)) * 100 * 1024 * 1024;
                     }
                     
-                    // Сохраняем кандидата
                     candidates[candidate_count].start = heap_start;
                     candidates[candidate_count].size = heap_size;
                     candidates[candidate_count].score = score;
-                    candidates[candidate_count].is_high_mem = (heap_start > 0xFFFFFFFF) ? 1 : 0;
-                    
-                    serial_puts("[MEM] Candidate ");
-                    serial_puts_num(candidate_count);
-                    serial_puts(": 0x");
-                    serial_puts_num_hex(heap_start);
-                    serial_puts(" - 0x");
-                    serial_puts_num_hex(heap_start + heap_size);
-                    serial_puts(" (");
-                    serial_puts_num(heap_size / (1024 * 1024));
-                    serial_puts(" MB), Score=");
-                    serial_puts_num(score);
-                    serial_puts("\n");
+                    candidates[candidate_count].dma_safe = (heap_start + heap_size <= DMA_ZONE_LIMIT) ? 1 : 0;
                     
                     candidate_count++;
                 }
@@ -487,14 +368,12 @@ static heap_config_t find_best_heap_region(void) {
         region = region->next;
     }
     
-    // Выбираем лучшего кандидата
     uint32_t best_index = 0;
     uint32_t best_score = 0;
     
     for (uint32_t i = 0; i < candidate_count; i++) {
-        // Предпочитаем низкую память для 32-бит систем
-        if (!candidates[i].is_high_mem) {
-            candidates[i].score += 300 * 1024 * 1024;
+        if (candidates[i].dma_safe) {
+            candidates[i].score += 500 * 1024 * 1024;
         }
         
         if (candidates[i].score > best_score) {
@@ -514,7 +393,11 @@ static heap_config_t find_best_heap_region(void) {
         serial_puts_num_hex(config.base + config.size);
         serial_puts(" (");
         serial_puts_num(config.size / (1024 * 1024));
-        serial_puts(" MB)\n");
+        serial_puts(" MB) ");
+        if (candidates[best_index].dma_safe) {
+            serial_puts("[DMA SAFE]");
+        }
+        serial_puts("\n");
     } else {
         serial_puts("[MEM] No suitable heap candidates found\n");
     }
@@ -522,14 +405,12 @@ static heap_config_t find_best_heap_region(void) {
     return config;
 }
 
-// Настройка кучи в выбранном регионе
 static int setup_heap_in_region(heap_config_t config) {
     if (!config.valid || config.size < (1 * 1024 * 1024)) {
         serial_puts("[MEM] ERROR: Invalid heap configuration\n");
         return 0;
     }
     
-    // Проверяем выравнивание
     if ((config.base & (PAGE_SIZE - 1)) != 0) {
         serial_puts("[MEM] ERROR: Heap base not page-aligned\n");
         return 0;
@@ -540,24 +421,18 @@ static int setup_heap_in_region(heap_config_t config) {
         return 0;
     }
     
-    // Проверяем пересечения
     if (check_area_overlap(config.base, config.base + config.size)) {
         serial_puts("[MEM] ERROR: Heap overlaps with reserved areas\n");
         return 0;
     }
     
-    // Проверяем, что куча не слишком близко к ядру
-    if (config.base < kernel_info.end + (2 * 1024 * 1024)) {
-        serial_puts("[MEM] WARNING: Heap is close to kernel\n");
-    }
-    
-    // Инициализируем кучу
     heap_start = (mem_block_t*)config.base;
     heap_end = (mem_block_t*)(config.base + config.size);
     
     heap_start->magic = MEM_BLOCK_MAGIC;
     heap_start->size = config.size;
     heap_start->free = 1;
+    heap_start->dma_safe = (config.base + config.size <= DMA_ZONE_LIMIT) ? 1 : 0;
     heap_start->next = NULL;
     heap_start->prev = NULL;
     
@@ -565,7 +440,6 @@ static int setup_heap_in_region(heap_config_t config) {
     heap_initialized = 1;
     mem_info.heap_size = config.size;
     
-    // Помечаем регион как использованный
     mem_region_t* region = memory_regions;
     while (region) {
         if (config.base >= region->base && 
@@ -577,31 +451,24 @@ static int setup_heap_in_region(heap_config_t config) {
         region = region->next;
     }
     
-    // Добавляем кучу в зарезервированные области
     add_reserved_area(config.base, config.base + config.size, "Heap");
     
     serial_puts("[MEM] Heap initialized successfully\n");
     return 1;
 }
 
-// Fallback: куча после ядра
 static int setup_fallback_heap(void) {
     serial_puts("[MEM] Setting up fallback heap...\n");
     
-    // Старт после ядра + 4MB запас
     uint32_t heap_start_addr = PAGE_ALIGN(kernel_info.end + 4 * 1024 * 1024);
     
-    // Определяем разумный размер на основе доступной памяти
     uint32_t heap_size = 0;
     
-    if (mem_info.available_memory > (512 * 1024 * 1024)) {
-        // Если больше 512MB доступно, берем 256MB
+    if (mem_info.dma_memory > (512 * 1024 * 1024)) {
         heap_size = 256 * 1024 * 1024;
-    } else if (mem_info.available_memory > (128 * 1024 * 1024)) {
-        // Если больше 128MB, берем 64MB
+    } else if (mem_info.dma_memory > (128 * 1024 * 1024)) {
         heap_size = 64 * 1024 * 1024;
     } else {
-        // Иначе берем 25% от доступной, но не менее 16MB
         heap_size = mem_info.available_memory / 4;
         heap_size = heap_size & ~(PAGE_SIZE - 1);
         
@@ -610,9 +477,8 @@ static int setup_fallback_heap(void) {
         }
     }
     
-    // Проверяем, что не превышаем доступную память
-    if (heap_size > mem_info.available_memory / 2) {
-        heap_size = mem_info.available_memory / 2;
+    if (heap_size > mem_info.dma_memory / 2) {
+        heap_size = mem_info.dma_memory / 2;
         heap_size = heap_size & ~(PAGE_SIZE - 1);
     }
     
@@ -620,7 +486,6 @@ static int setup_fallback_heap(void) {
     serial_puts_num(heap_size / (1024 * 1024));
     serial_puts(" MB\n");
     
-    // Проверяем, что выбранный регион не пересекается с зарезервированными областями
     if (check_area_overlap(heap_start_addr, heap_start_addr + heap_size)) {
         serial_puts("[MEM] ERROR: Fallback heap location overlaps reserved areas\n");
         return 0;
@@ -635,74 +500,64 @@ static int setup_fallback_heap(void) {
     return setup_heap_in_region(config);
 }
 
-// Поиск свободного блока
-static mem_block_t* find_free_block(uint32_t size) {
+static mem_block_t* find_free_block(uint32_t size, int require_dma_safe) {
     mem_block_t* current = heap_start;
+    mem_block_t* best = NULL;
+    uint32_t best_size = 0xFFFFFFFF;
     
     while (current) {
         if (current->free && current->size >= size) {
-            return current;
+            if (require_dma_safe && !current->dma_safe) {
+                current = current->next;
+                continue;
+            }
+            
+            if (current->size < best_size) {
+                best = current;
+                best_size = current->size;
+            }
         }
         current = current->next;
     }
     
-    return NULL;
+    return best;
 }
 
-// Разделение блока
 static void split_block(mem_block_t* block, uint32_t size) {
     if (!block) return;
     
-    // Минимальный размер для нового блока
     uint32_t min_new_block_size = sizeof(mem_block_t) + MEM_ALIGNMENT;
     
     if (block->size < size + min_new_block_size) {
-        // Не хватает места для нового блока
-        block->free = 0;  // Используем весь блок
+        block->free = 0;
         return;
     }
     
-    // Создаем новый свободный блок
     mem_block_t* new_block = (mem_block_t*)((uint8_t*)block + size);
     
     new_block->magic = MEM_BLOCK_MAGIC;
     new_block->size = block->size - size;
     new_block->free = 1;
+    new_block->dma_safe = block->dma_safe;
     new_block->next = block->next;
     new_block->prev = block;
     
-    // Обновляем связи
     block->size = size;
-    block->free = 0;  // Исходный блок теперь занят
+    block->free = 0;
     block->next = new_block;
     
     if (new_block->next) {
         new_block->next->prev = new_block;
     }
     
-    // Если этот блок был в конце
     if (block == heap_end) {
         heap_end = new_block;
     }
-    
-    #ifdef DEBUG_MEMORY
-    serial_puts("[MEM] Split block: old=");
-    serial_puts_num_hex((uint32_t)block);
-    serial_puts(" (");
-    serial_puts_num(size);
-    serial_puts("), new=");
-    serial_puts_num_hex((uint32_t)new_block);
-    serial_puts(" (");
-    serial_puts_num(new_block->size);
-    serial_puts(")\n");
-    #endif
 }
 
-// Слияние блоков
 static void merge_blocks(mem_block_t* block) {
     if (!block || !block->free) return;
     
-    // Слияние с правым блоком
     if (block->next && block->next->free) {
         block->size += block->next->size;
         block->next = block->next->next;
@@ -716,7 +571,6 @@ static void merge_blocks(mem_block_t* block) {
         }
     }
     
-    // Слияние с левым блоком
     if (block->prev && block->prev->free) {
         block->prev->size += block->size;
         block->prev->next = block->next;
@@ -733,56 +587,15 @@ static void merge_blocks(mem_block_t* block) {
     }
 }
 
-// Получение информации о памяти
-memory_info_t get_memory_info(void) {
-    if (heap_initialized) {
-        mem_block_t* current = heap_start;
-        uint32_t used = 0;
-        uint32_t free = 0;
-        uint32_t free_blocks = 0;
-        
-        while (current) {
-            if (current->free) {
-                free += current->size;
-                free_blocks++;
-            } else {
-                used += current->size;
-            }
-            current = current->next;
-        }
-        
-        mem_info.heap_used = used;
-        mem_info.heap_free = free;
-        
-        // Вычисляем фрагментацию
-        if (free_blocks > 1) {
-            mem_info.fragmentation = (free_blocks - 1) * 100 / free_blocks;
-        } else {
-            mem_info.fragmentation = 0;
-        }
-    }
-    
-    return mem_info;
-}
-
-#endif // USE_ADVANCED_ALLOCATOR
-
-// === Общедоступные функции ===
-
-// Инициализация памяти
 void memory_init(void) {
     serial_puts("[MEM] Initializing memory system...\n");
     
     #if USE_ADVANCED_ALLOCATOR
     serial_puts("[MEM] Using advanced allocator\n");
     
-    // Определяем границы ядра
     detect_kernel_bounds();
-    
-    // Инициализируем зарезервированные области
     init_reserved_areas();
     
-    // Проверяем информацию о памяти
     if (mem_info.region_count == 0) {
         serial_puts("[MEM] WARNING: No memory map information\n");
         if (!setup_fallback_heap()) {
@@ -790,7 +603,6 @@ void memory_init(void) {
             return;
         }
     } else {
-        // Ищем лучший регион для кучи
         heap_config_t config = find_best_heap_region();
         
         if (config.valid) {
@@ -825,7 +637,6 @@ void memory_init(void) {
     #endif
 }
 
-// Инициализация из Multiboot
 void memory_init_multiboot(multiboot_info_t* mb_info) {
     if (!mb_info) {
         serial_puts("[MEM] No multiboot info\n");
@@ -838,22 +649,12 @@ void memory_init_multiboot(multiboot_info_t* mb_info) {
         uint32_t mem_lower = mb_info->mem_lower;
         uint32_t mem_upper = mb_info->mem_upper;
         
-        serial_puts("[MEM] Lower memory: ");
-        serial_puts_num(mem_lower);
-        serial_puts(" KB\n");
-        
-        serial_puts("[MEM] Upper memory: ");
-        serial_puts_num(mem_upper);
-        serial_puts(" KB\n");
-        
         uint32_t total_kb = mem_lower + mem_upper + 1024;
         mem_info.total_memory = total_kb * 1024;
         
         serial_puts("[MEM] Total available: ");
         serial_puts_num(total_kb / 1024);
         serial_puts(" MB\n");
-    } else {
-        serial_puts("[MEM] No basic memory info from Multiboot\n");
     }
     
     #if USE_ADVANCED_ALLOCATOR
@@ -863,8 +664,7 @@ void memory_init_multiboot(multiboot_info_t* mb_info) {
     #endif
 }
 
-// Выделение памяти
-void* kmalloc(uint32_t size) {
+void* kmalloc_flags(uint32_t size, uint8_t flags) {
     if (size == 0) return NULL;
     
     #if USE_ADVANCED_ALLOCATOR
@@ -873,66 +673,36 @@ void* kmalloc(uint32_t size) {
         return NULL;
     }
     
+    int require_dma_safe = (flags & KMALLOC_DMA) ? 1 : 0;
     uint32_t total_size = ALIGN(size + sizeof(mem_block_t));
-    mem_block_t* block = find_free_block(total_size);
+    
+    mem_block_t* block = find_free_block(total_size, require_dma_safe);
     
     if (!block) {
         serial_puts("[MEM] ERROR: Out of memory! Requested ");
         serial_puts_num(size);
-        serial_puts(" bytes\n");
-        
-        // Детальная диагностика
-        serial_puts("[MEM] Debug: total_size=");
-        serial_puts_num(total_size);
-        serial_puts(", heap_total=");
-        serial_puts_num(heap_total_size);
-        serial_puts(", largest_free=");
-        
-        // Находим самый большой свободный блок
-        uint32_t largest_free = 0;
-        mem_block_t* curr = heap_start;
-        while (curr) {
-            if (curr->free && curr->size > largest_free) {
-                largest_free = curr->size;
-            }
-            curr = curr->next;
-        }
-        serial_puts_num(largest_free);
+        serial_puts(" bytes");
+        if (require_dma_safe) serial_puts(" (DMA)");
         serial_puts("\n");
         
         memory_stats();
         return NULL;
     }
     
-    // ВАЖНОЕ ИСПРАВЛЕНИЕ: Принудительно делим большие блоки
-    // Даже если не хватает места для идеального разделения,
-    // нужно оставить хоть что-то свободное
-    
     if (block->size >= total_size + sizeof(mem_block_t)) {
-        // Есть место для разделения
         split_block(block, total_size);
-    } else if (block->size > total_size * 2) {
-        // Блок очень большой - делим пополам
-        uint32_t half_size = block->size / 2;
-        half_size = ALIGN(half_size);
-        split_block(block, half_size);
-        block->free = 0;
     } else {
-        // Блок не намного больше запроса - используем целиком
         block->free = 0;
     }
     
     void* ptr = (void*)((uint8_t*)block + sizeof(mem_block_t));
     
-    #ifdef DEBUG_MEMORY
-    serial_puts("[MEM] Allocated ");
-    serial_puts_num(size);
-    serial_puts(" bytes at 0x");
-    serial_puts_num_hex((uint32_t)ptr);
-    serial_puts(", block size=");
-    serial_puts_num(block->size);
-    serial_puts("\n");
-    #endif
+    if (flags & KMALLOC_ZERO) {
+        uint8_t* p = (uint8_t*)ptr;
+        for (uint32_t i = 0; i < size; i++) {
+            p[i] = 0;
+        }
+    }
     
     return ptr;
     
@@ -954,18 +724,7 @@ void* kmalloc(uint32_t size) {
             for (uint32_t j = 0; j < blocks_needed; j++) {
                 heap_used[i + j] = 1;
             }
-            
-            void* ptr = &heap[i * BLOCK_SIZE];
-            
-            #ifdef DEBUG_MEMORY
-            serial_puts("[MEM] Allocated ");
-            serial_puts_num(size);
-            serial_puts(" bytes at 0x");
-            serial_puts_num_hex((uint32_t)ptr);
-            serial_puts("\n");
-            #endif
-            
-            return ptr;
+            return &heap[i * BLOCK_SIZE];
         }
     }
     
@@ -974,7 +733,14 @@ void* kmalloc(uint32_t size) {
     #endif
 }
 
-// Освобождение памяти
+void* kmalloc(uint32_t size) {
+    return kmalloc_flags(size, KMALLOC_NORMAL);
+}
+
+void* kmalloc_dma(uint32_t size) {
+    return kmalloc_flags(size, KMALLOC_DMA);
+}
+
 void kfree(void* ptr) {
     if (!ptr) return;
     
@@ -994,12 +760,6 @@ void kfree(void* ptr) {
     block->free = 1;
     merge_blocks(block);
     
-    #ifdef DEBUG_MEMORY
-    serial_puts("[MEM] Freed memory at 0x");
-    serial_puts_num_hex((uint32_t)ptr);
-    serial_puts("\n");
-    #endif
-    
     #else
     uint32_t offset = (uint32_t)ptr - (uint32_t)heap;
     if (offset >= HEAP_SIZE) {
@@ -1009,16 +769,13 @@ void kfree(void* ptr) {
     
     uint32_t block_index = offset / BLOCK_SIZE;
     heap_used[block_index] = 0;
-    
-    #ifdef DEBUG_MEMORY
-    serial_puts("[MEM] Freed block ");
-    serial_puts_num(block_index);
-    serial_puts("\n");
-    #endif
     #endif
 }
 
-// Перераспределение памяти
+void kfree_dma(void* ptr) {
+    kfree(ptr);
+}
+
 void* krealloc(void* ptr, uint32_t size) {
     if (!ptr) return kmalloc(size);
     if (size == 0) {
@@ -1044,7 +801,6 @@ void* krealloc(void* ptr, uint32_t size) {
         return ptr;
     }
     
-    // Пробуем расширить
     if (block->next && block->next->free && 
         (block->size + block->next->size) >= ALIGN(size + sizeof(mem_block_t))) {
         
@@ -1063,7 +819,6 @@ void* krealloc(void* ptr, uint32_t size) {
         return ptr;
     }
     
-    // Выделяем новый блок
     void* new_ptr = kmalloc(size);
     if (!new_ptr) return NULL;
     
@@ -1084,22 +839,104 @@ void* krealloc(void* ptr, uint32_t size) {
     #endif
 }
 
-// Выделение с обнулением
 void* kcalloc(uint32_t num, uint32_t size) {
-    uint32_t total = num * size;
-    void* ptr = kmalloc(total);
+    return kmalloc_flags(num * size, KMALLOC_ZERO);
+}
+
+void* kmalloc_aligned(uint32_t size, uint32_t align) {
+    uint32_t total = size + align + sizeof(void*);
+    void* raw = kmalloc(total);
+    if (!raw) return NULL;
     
-    if (ptr) {
-        uint8_t* p = (uint8_t*)ptr;
-        for (uint32_t i = 0; i < total; i++) {
-            p[i] = 0;
+    uintptr_t raw_addr = (uintptr_t)raw;
+    uintptr_t aligned = (raw_addr + align - 1) & ~(align - 1);
+    uintptr_t* header = (uintptr_t*)(aligned - sizeof(void*));
+    *header = raw_addr;
+    
+    return (void*)aligned;
+}
+
+void kfree_aligned(void *ptr) {
+    if (!ptr) return;
+    uintptr_t *header = (uintptr_t*)((uintptr_t)ptr - sizeof(void*));
+    void *raw = (void*)*header;
+    kfree(raw);
+}
+
+uint32_t virt_to_phys(void* virt) {
+    if (!paging_active || !current_directory) {
+        return (uint32_t)virt;
+    }
+    return paging_get_physical(current_directory, (uint32_t)virt);
+}
+
+void* phys_to_virt(uint32_t phys) {
+    if (!paging_active || !current_directory) {
+        return (void*)phys;
+    }
+    return (void*)phys;
+}
+
+uint32_t get_phys_addr(void* virt) {
+    return virt_to_phys(virt);
+}
+
+int is_dma_safe(void* ptr) {
+    if (!ptr) return 0;
+    
+    uint32_t phys = virt_to_phys(ptr);
+    if (phys > DMA_ZONE_LIMIT) return 0;
+    
+    #if USE_ADVANCED_ALLOCATOR
+    if (heap_initialized) {
+        mem_block_t* block = (mem_block_t*)((uint8_t*)ptr - sizeof(mem_block_t));
+        if (block->magic == MEM_BLOCK_MAGIC) {
+            return block->dma_safe;
+        }
+    }
+    #endif
+    
+    return (phys <= DMA_ZONE_LIMIT);
+}
+
+memory_info_t get_memory_info(void) {
+    if (heap_initialized) {
+        mem_block_t* current = heap_start;
+        uint32_t used = 0;
+        uint32_t free = 0;
+        uint32_t free_blocks = 0;
+        uint32_t dma_safe = 0;
+        
+        while (current) {
+            if (current->free) {
+                free += current->size;
+                free_blocks++;
+                if (current->dma_safe) {
+                    dma_safe += current->size;
+                }
+            } else {
+                used += current->size;
+                if (current->dma_safe) {
+                    dma_safe += current->size;
+                }
+            }
+            current = current->next;
+        }
+        
+        mem_info.heap_used = used;
+        mem_info.heap_free = free;
+        mem_info.heap_dma_safe = dma_safe;
+        
+        if (free_blocks > 1) {
+            mem_info.fragmentation = (free_blocks - 1) * 100 / free_blocks;
+        } else {
+            mem_info.fragmentation = 0;
         }
     }
     
-    return ptr;
+    return mem_info;
 }
 
-// Общий объем памяти
 uint32_t get_total_memory(void) {
     #if USE_ADVANCED_ALLOCATOR
     return mem_info.total_memory;
@@ -1108,7 +945,6 @@ uint32_t get_total_memory(void) {
     #endif
 }
 
-// Свободная память
 uint32_t get_free_memory(void) {
     #if USE_ADVANCED_ALLOCATOR
     return mem_info.heap_free;
@@ -1121,7 +957,14 @@ uint32_t get_free_memory(void) {
     #endif
 }
 
-// Дамп информации
+uint32_t get_dma_memory(void) {
+    #if USE_ADVANCED_ALLOCATOR
+    return mem_info.dma_memory;
+    #else
+    return HEAP_SIZE;
+    #endif
+}
+
 void memory_dump(void) {
     serial_puts("\n=== MEMORY INFORMATION ===\n");
     
@@ -1135,6 +978,9 @@ void memory_dump(void) {
     serial_puts("  Available:  ");
     serial_puts_num(info.available_memory / (1024*1024));
     serial_puts(" MB\n");
+    serial_puts("  DMA-safe:   ");
+    serial_puts_num(info.dma_memory / (1024*1024));
+    serial_puts(" MB\n");
     serial_puts("  Largest:    ");
     serial_puts_num(info.largest_block / (1024*1024));
     serial_puts(" MB\n");
@@ -1146,8 +992,6 @@ void memory_dump(void) {
     serial_puts("  Used:       ");
     serial_puts_num(info.heap_used / (1024*1024));
     serial_puts(" MB");
-    
-    // ИСПРАВЛЕННЫЙ РАСЧЕТ ПРОЦЕНТОВ:
     if (info.heap_size > 0) {
         uint32_t used_percent = (info.heap_used * 100) / info.heap_size;
         serial_puts(" (");
@@ -1166,6 +1010,10 @@ void memory_dump(void) {
         serial_puts("%)");
     }
     serial_puts("\n");
+    
+    serial_puts("  DMA-safe:   ");
+    serial_puts_num(info.heap_dma_safe / (1024*1024));
+    serial_puts(" MB\n");
     
     serial_puts("  Fragmentation: ");
     serial_puts_num(info.fragmentation);
@@ -1207,7 +1055,6 @@ void memory_dump(void) {
     serial_puts("===========================\n");
 }
 
-// Статистика памяти
 void memory_stats(void) {
     #if USE_ADVANCED_ALLOCATOR
     if (!heap_initialized) {
@@ -1244,7 +1091,10 @@ void memory_stats(void) {
     }
     serial_puts("\n");
     
-    // Подсчет блоков
+    serial_puts("  DMA-safe:  ");
+    serial_puts_num(info.heap_dma_safe / 1024);
+    serial_puts(" KB\n");
+    
     mem_block_t* current = heap_start;
     uint32_t total_blocks = 0;
     uint32_t free_blocks = 0;
@@ -1277,7 +1127,6 @@ void memory_stats(void) {
     #endif
 }
 
-// Проверка целостности
 void heap_validate(void) {
     #if USE_ADVANCED_ALLOCATOR
     if (!heap_initialized) {
@@ -1297,14 +1146,12 @@ void heap_validate(void) {
         block_count++;
         total_size += current->size;
         
-        // Проверка 1: Магическое число
         if (current->magic != MEM_BLOCK_MAGIC) {
             serial_puts("\n  ERROR: Bad magic at block ");
             serial_puts_num(block_count - 1);
             errors++;
         }
         
-        // Проверка 2: Минимальный размер
         if (current->size < sizeof(mem_block_t)) {
             serial_puts("\n  ERROR: Block too small (");
             serial_puts_num(current->size);
@@ -1313,7 +1160,6 @@ void heap_validate(void) {
             errors++;
         }
         
-        // Проверка 3: Корректность связей
         if (current->next) {
             if ((uint8_t*)current->next < (uint8_t*)current) {
                 serial_puts("\n  ERROR: Next pointer goes backward at ");
@@ -1328,7 +1174,6 @@ void heap_validate(void) {
             }
         }
         
-        // Проверка 4: Free блоки не должны быть слишком маленькими
         if (current->free && current->size < (sizeof(mem_block_t) * 2)) {
             serial_puts("\n  WARNING: Small free block (");
             serial_puts_num(current->size);
@@ -1340,7 +1185,6 @@ void heap_validate(void) {
         current = current->next;
     }
     
-    // Проверка общего размера
     if (total_size != heap_total_size) {
         serial_puts("\n  ERROR: Size mismatch: expected ");
         serial_puts_num(heap_total_size);
@@ -1380,6 +1224,8 @@ void debug_heap_layout(void) {
     uint32_t index = 0;
     uint32_t total_used = 0;
     uint32_t total_free = 0;
+    uint32_t dma_safe_used = 0;
+    uint32_t dma_safe_free = 0;
     
     while (current) {
         serial_puts("Block ");
@@ -1395,9 +1241,15 @@ void debug_heap_layout(void) {
         if (current->free) {
             serial_puts("[FREE]");
             total_free += current->size;
+            if (current->dma_safe) dma_safe_free += current->size;
         } else {
             serial_puts("[USED]");
             total_used += current->size;
+            if (current->dma_safe) dma_safe_used += current->size;
+        }
+        
+        if (current->dma_safe) {
+            serial_puts(" [DMA]");
         }
         
         serial_puts("\n");
@@ -1431,35 +1283,25 @@ void debug_heap_layout(void) {
         serial_puts("0");
     }
     serial_puts("%)\n");
+    serial_puts("  DMA safe used: ");
+    serial_puts_num(dma_safe_used);
+    serial_puts(" bytes\n");
+    serial_puts("  DMA safe free: ");
+    serial_puts_num(dma_safe_free);
+    serial_puts(" bytes\n");
     serial_puts("===================\n");
     #endif
 }
 
-// Совместимость
+void memory_paging_activated(void) {
+    paging_active = 1;
+    serial_puts("[MEM] Paging activated, address translation enabled\n");
+}
+
 void* malloc(uint32_t size) {
     return kmalloc(size);
 }
 
 void free(void* ptr) {
     kfree(ptr);
-}
-
-void* kmalloc_aligned(uint32_t size, uint32_t align) {
-    uint32_t total = size + align + sizeof(void*);
-    void* raw = kmalloc(total);
-    if (!raw) return NULL;
-    
-    uintptr_t raw_addr = (uintptr_t)raw;
-    uintptr_t aligned = (raw_addr + align - 1) & ~(align - 1);
-    uintptr_t* header = (uintptr_t*)(aligned - sizeof(void*));
-    *header = raw_addr;
-    
-    return (void*)aligned;
-}
-
-void kfree_aligned(void *ptr) {
-    if (!ptr) return;
-    uintptr_t *header = (uintptr_t*)((uintptr_t)ptr - sizeof(void*));
-    void *raw = (void*)*header;
-    kfree(raw);
 }
