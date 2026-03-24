@@ -66,13 +66,13 @@ typedef struct heap_config {
     uint8_t valid;
 } heap_config_t;
 
+// Блок памяти для аллокатора
 typedef struct mem_block {
-    uint32_t magic;
-    uint32_t size;
-    uint8_t free;
-    uint8_t dma_safe;
+    uint32_t size;              // Размер блока (только данные)
     struct mem_block* next;
     struct mem_block* prev;
+    uint8_t free;               // 1 - свободен, 0 - занят
+    uint32_t magic;             // Магическое число для проверки
 } mem_block_t;
 
 typedef struct {
@@ -101,6 +101,9 @@ void kfree_aligned(void* ptr);
 
 void* kmalloc_dma(uint32_t size);
 void kfree_dma(void* ptr);
+void* kmalloc_dma_region(uint32_t size, uint32_t* phys_addr);
+void kfree_dma_region(void* virt, uint32_t size);
+int is_dma_safe_region(void* virt, uint32_t size, uint32_t* phys_addr);
 
 uint32_t virt_to_phys(void* virt);
 void* phys_to_virt(uint32_t phys);

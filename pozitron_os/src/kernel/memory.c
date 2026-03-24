@@ -5,10 +5,12 @@
 #include "lib/string.h"
 
 #if USE_ADVANCED_ALLOCATOR
+
+// ============ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ============
 mem_block_t* heap_start = NULL;
 mem_block_t* heap_end = NULL;
-uint32_t heap_total_size = 0;
-uint32_t heap_initialized = 0;
+uint32_t heap_total = 0;
+int heap_initialized = 0;
 
 mem_region_t* memory_regions = NULL;
 static mem_region_t* heap_region = NULL;
@@ -30,6 +32,7 @@ static uint8_t heap[HEAP_SIZE];
 static uint8_t heap_used[HEAP_SIZE / BLOCK_SIZE] = {0};
 #endif
 
+// ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
 static void safe_strcpy(char* dest, const char* src, size_t max_len) {
     size_t i;
     for (i = 0; i < max_len - 1 && src[i] != '\0'; i++) {
@@ -405,6 +408,24 @@ static heap_config_t find_best_heap_region(void) {
     return config;
 }
 
+static void heap_init_region(void* start, size_t size)
+{
+    heap_start = (mem_block_t*)start;
+    heap_start->size = size - sizeof(mem_block_t);
+    heap_start->next = NULL;
+    heap_start->prev = NULL;
+    heap_start->free = 1;
+    heap_start->magic = MEM_BLOCK_MAGIC;
+    
+    heap_end = heap_start;
+    heap_total = size;
+    heap_initialized = 1;
+    
+    mem_info.heap_size = size;
+    
+    add_reserved_area((uint32_t)start, (uint32_t)start + size, "Heap");
+}
+
 static int setup_heap_in_region(heap_config_t config) {
     if (!config.valid || config.size < (1 * 1024 * 1024)) {
         serial_puts("[MEM] ERROR: Invalid heap configuration\n");
@@ -426,32 +447,17 @@ static int setup_heap_in_region(heap_config_t config) {
         return 0;
     }
     
-    heap_start = (mem_block_t*)config.base;
-    heap_end = (mem_block_t*)(config.base + config.size);
-    
-    heap_start->magic = MEM_BLOCK_MAGIC;
-    heap_start->size = config.size;
-    heap_start->free = 1;
-    heap_start->dma_safe = (config.base + config.size <= DMA_ZONE_LIMIT) ? 1 : 0;
-    heap_start->next = NULL;
-    heap_start->prev = NULL;
-    
-    heap_total_size = config.size;
-    heap_initialized = 1;
-    mem_info.heap_size = config.size;
+    heap_init_region((void*)config.base, config.size);
     
     mem_region_t* region = memory_regions;
     while (region) {
         if (config.base >= region->base && 
             config.base + config.size <= region->base + region->size) {
             region->used = 1;
-            heap_region = region;
             break;
         }
         region = region->next;
     }
-    
-    add_reserved_area(config.base, config.base + config.size, "Heap");
     
     serial_puts("[MEM] Heap initialized successfully\n");
     return 1;
@@ -500,52 +506,30 @@ static int setup_fallback_heap(void) {
     return setup_heap_in_region(config);
 }
 
-static mem_block_t* find_free_block(uint32_t size, int require_dma_safe) {
-    mem_block_t* current = heap_start;
-    mem_block_t* best = NULL;
-    uint32_t best_size = 0xFFFFFFFF;
+static void split_block(mem_block_t* block, uint32_t size)
+{
+    uint32_t remaining = block->size - size - sizeof(mem_block_t);
     
-    while (current) {
-        if (current->free && current->size >= size) {
-            if (require_dma_safe && !current->dma_safe) {
-                current = current->next;
-                continue;
-            }
-            
-            if (current->size < best_size) {
-                best = current;
-                best_size = current->size;
-            }
-        }
-        current = current->next;
-    }
-    
-    return best;
-}
-
-static void split_block(mem_block_t* block, uint32_t size) {
-    if (!block) return;
-    
-    uint32_t min_new_block_size = sizeof(mem_block_t) + MEM_ALIGNMENT;
-    
-    if (block->size < size + min_new_block_size) {
+    // Если остаток слишком мал - не делим, весь блок становится занятым
+    if (remaining < sizeof(mem_block_t) + 16) {
         block->free = 0;
         return;
     }
     
-    mem_block_t* new_block = (mem_block_t*)((uint8_t*)block + size);
-    
-    new_block->magic = MEM_BLOCK_MAGIC;
-    new_block->size = block->size - size;
+    // Создаём новый свободный блок
+    mem_block_t* new_block = (mem_block_t*)((uint8_t*)block + sizeof(mem_block_t) + size);
+    new_block->size = remaining;
     new_block->free = 1;
-    new_block->dma_safe = block->dma_safe;
+    new_block->magic = MEM_BLOCK_MAGIC;
     new_block->next = block->next;
     new_block->prev = block;
     
+    // Обновляем текущий блок
     block->size = size;
     block->free = 0;
     block->next = new_block;
     
+    // Обновляем связи
     if (new_block->next) {
         new_block->next->prev = new_block;
     }
@@ -555,36 +539,57 @@ static void split_block(mem_block_t* block, uint32_t size) {
     }
 }
 
-static void merge_blocks(mem_block_t* block) {
-    if (!block || !block->free) return;
+static void merge_block(mem_block_t* block)
+{
+    if (!block->free) return;
     
+    // Объединяем со следующим
     if (block->next && block->next->free) {
-        block->size += block->next->size;
+        block->size += sizeof(mem_block_t) + block->next->size;
         block->next = block->next->next;
         
         if (block->next) {
             block->next->prev = block;
-        }
-        
-        if (!block->next) {
+        } else {
             heap_end = block;
         }
+        // После слияния со следующим, проверяем ещё раз (может быть цепочка)
+        merge_block(block);
+        return;
     }
     
+    // Объединяем с предыдущим
     if (block->prev && block->prev->free) {
-        block->prev->size += block->size;
+        block->prev->size += sizeof(mem_block_t) + block->size;
         block->prev->next = block->next;
         
         if (block->next) {
             block->next->prev = block->prev;
-        }
-        
-        if (!block->prev->next) {
+        } else {
             heap_end = block->prev;
         }
-        
-        block = block->prev;
     }
+}
+
+static mem_block_t* find_free_block(uint32_t size)
+{
+    mem_block_t* current = heap_start;
+    mem_block_t* best = NULL;
+    uint32_t best_size = 0xFFFFFFFF;
+    
+    // Проходим весь список до конца
+    while (current) {
+        if (current->free && current->size >= size && current->magic == MEM_BLOCK_MAGIC) {
+            if (current->size < best_size) {
+                best = current;
+                best_size = current->size;
+                if (best_size == size) break;
+            }
+        }
+        current = current->next;
+    }
+    
+    return best;
 }
 
 void memory_init(void) {
@@ -664,7 +669,7 @@ void memory_init_multiboot(multiboot_info_t* mb_info) {
     #endif
 }
 
-void* kmalloc_flags(uint32_t size, uint8_t flags) {
+void* kmalloc(uint32_t size) {
     if (size == 0) return NULL;
     
     #if USE_ADVANCED_ALLOCATOR
@@ -673,38 +678,25 @@ void* kmalloc_flags(uint32_t size, uint8_t flags) {
         return NULL;
     }
     
-    int require_dma_safe = (flags & KMALLOC_DMA) ? 1 : 0;
-    uint32_t total_size = ALIGN(size + sizeof(mem_block_t));
+    size = (size + 3) & ~3;
     
-    mem_block_t* block = find_free_block(total_size, require_dma_safe);
+    mem_block_t* block = find_free_block(size);
     
     if (!block) {
-        serial_puts("[MEM] ERROR: Out of memory! Requested ");
+        serial_puts("[MEM] Out of memory! Requested ");
         serial_puts_num(size);
-        serial_puts(" bytes");
-        if (require_dma_safe) serial_puts(" (DMA)");
-        serial_puts("\n");
-        
+        serial_puts(" bytes\n");
         memory_stats();
         return NULL;
     }
     
-    if (block->size >= total_size + sizeof(mem_block_t)) {
-        split_block(block, total_size);
+    if (block->size > size + sizeof(mem_block_t) + 16) {
+        split_block(block, size);
     } else {
         block->free = 0;
     }
     
-    void* ptr = (void*)((uint8_t*)block + sizeof(mem_block_t));
-    
-    if (flags & KMALLOC_ZERO) {
-        uint8_t* p = (uint8_t*)ptr;
-        for (uint32_t i = 0; i < size; i++) {
-            p[i] = 0;
-        }
-    }
-    
-    return ptr;
+    return (void*)((uint8_t*)block + sizeof(mem_block_t));
     
     #else
     uint32_t blocks_needed = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -733,14 +725,6 @@ void* kmalloc_flags(uint32_t size, uint8_t flags) {
     #endif
 }
 
-void* kmalloc(uint32_t size) {
-    return kmalloc_flags(size, KMALLOC_NORMAL);
-}
-
-void* kmalloc_dma(uint32_t size) {
-    return kmalloc_flags(size, KMALLOC_DMA);
-}
-
 void kfree(void* ptr) {
     if (!ptr) return;
     
@@ -757,8 +741,13 @@ void kfree(void* ptr) {
         return;
     }
     
+    if (block->free) {
+        serial_puts("[MEM] WARNING: Double free detected\n");
+        return;
+    }
+    
     block->free = 1;
-    merge_blocks(block);
+    merge_block(block);
     
     #else
     uint32_t offset = (uint32_t)ptr - (uint32_t)heap;
@@ -770,10 +759,6 @@ void kfree(void* ptr) {
     uint32_t block_index = offset / BLOCK_SIZE;
     heap_used[block_index] = 0;
     #endif
-}
-
-void kfree_dma(void* ptr) {
-    kfree(ptr);
 }
 
 void* krealloc(void* ptr, uint32_t size) {
@@ -791,46 +776,42 @@ void* krealloc(void* ptr, uint32_t size) {
         return NULL;
     }
     
-    uint32_t old_size = block->size - sizeof(mem_block_t);
+    uint32_t old_size = block->size;
+    uint32_t new_size = (size + 3) & ~3;
     
-    if (size <= old_size) {
-        uint32_t new_total_size = ALIGN(size + sizeof(mem_block_t));
-        if (block->size >= new_total_size + sizeof(mem_block_t) + MEM_ALIGNMENT) {
-            split_block(block, new_total_size);
+    if (new_size <= old_size) {
+        if (block->size > new_size + sizeof(mem_block_t) + 16) {
+            split_block(block, new_size);
         }
         return ptr;
     }
     
-    if (block->next && block->next->free && 
-        (block->size + block->next->size) >= ALIGN(size + sizeof(mem_block_t))) {
-        
-        block->size += block->next->size;
-        block->next = block->next->next;
-        
-        if (block->next) {
-            block->next->prev = block;
+    if (block->next && block->next->free) {
+        uint32_t combined = block->size + sizeof(mem_block_t) + block->next->size;
+        if (combined >= new_size) {
+            block->size += sizeof(mem_block_t) + block->next->size;
+            block->next = block->next->next;
+            
+            if (block->next) {
+                block->next->prev = block;
+            } else {
+                heap_end = block;
+            }
+            
+            if (block->size > new_size + sizeof(mem_block_t) + 16) {
+                split_block(block, new_size);
+            }
+            return ptr;
         }
-        
-        uint32_t new_total_size = ALIGN(size + sizeof(mem_block_t));
-        if (block->size >= new_total_size + sizeof(mem_block_t) + MEM_ALIGNMENT) {
-            split_block(block, new_total_size);
-        }
-        
-        return ptr;
     }
     
     void* new_ptr = kmalloc(size);
     if (!new_ptr) return NULL;
     
-    uint32_t copy_size = (old_size < size) ? old_size : size;
-    uint8_t* src = (uint8_t*)ptr;
-    uint8_t* dst = (uint8_t*)new_ptr;
-    
-    for (uint32_t i = 0; i < copy_size; i++) {
-        dst[i] = src[i];
-    }
-    
+    uint32_t copy_size = old_size < size ? old_size : size;
+    memcpy(new_ptr, ptr, copy_size);
     kfree(ptr);
+    
     return new_ptr;
     
     #else
@@ -840,27 +821,77 @@ void* krealloc(void* ptr, uint32_t size) {
 }
 
 void* kcalloc(uint32_t num, uint32_t size) {
-    return kmalloc_flags(num * size, KMALLOC_ZERO);
+    uint32_t total = num * size;
+    void* ptr = kmalloc(total);
+    if (ptr) memset(ptr, 0, total);
+    return ptr;
 }
 
 void* kmalloc_aligned(uint32_t size, uint32_t align) {
+    if (align < sizeof(void*)) align = sizeof(void*);
+    
     uint32_t total = size + align + sizeof(void*);
     void* raw = kmalloc(total);
     if (!raw) return NULL;
     
     uintptr_t raw_addr = (uintptr_t)raw;
     uintptr_t aligned = (raw_addr + align - 1) & ~(align - 1);
-    uintptr_t* header = (uintptr_t*)(aligned - sizeof(void*));
-    *header = raw_addr;
+    
+    void** header = (void**)(aligned - sizeof(void*));
+    *header = raw;
+    
+    memset((void*)aligned, 0, size);
     
     return (void*)aligned;
 }
 
-void kfree_aligned(void *ptr) {
+void kfree_aligned(void* ptr) {
     if (!ptr) return;
-    uintptr_t *header = (uintptr_t*)((uintptr_t)ptr - sizeof(void*));
-    void *raw = (void*)*header;
+    void** header = (void**)((uintptr_t)ptr - sizeof(void*));
+    void* raw = *header;
     kfree(raw);
+}
+
+void* kmalloc_flags(uint32_t size, uint8_t flags) {
+    (void)flags;
+    return kmalloc(size);
+}
+
+void* kmalloc_dma(uint32_t size) {
+    return kmalloc(size);
+}
+
+void kfree_dma(void* ptr) {
+    kfree(ptr);
+}
+
+void* kmalloc_dma_region(uint32_t size, uint32_t* phys_addr) {
+    size = PAGE_ALIGN(size);
+    void* virt = kmalloc_aligned(size, PAGE_SIZE);
+    if (!virt) {
+        serial_puts("[MEM] Failed to allocate DMA region\n");
+        return NULL;
+    }
+
+    memset(virt, 0, size);
+    *phys_addr = virt_to_phys(virt);
+    if (*phys_addr > DMA_ZONE_LIMIT) {
+        serial_puts("[MEM] WARNING: DMA region above 4GB\n");
+    }
+    
+    return virt;
+}
+
+void kfree_dma_region(void* virt, uint32_t size) {
+    (void)size;
+    kfree_aligned(virt);
+}
+
+int is_dma_safe_region(void* virt, uint32_t size, uint32_t* phys_addr) {
+    if (!virt || size == 0) return 0;
+    uint32_t phys = virt_to_phys(virt);
+    if (phys_addr) *phys_addr = phys;
+    return 1;
 }
 
 uint32_t virt_to_phys(void* virt) {
@@ -883,49 +914,30 @@ uint32_t get_phys_addr(void* virt) {
 
 int is_dma_safe(void* ptr) {
     if (!ptr) return 0;
-    
     uint32_t phys = virt_to_phys(ptr);
-    if (phys > DMA_ZONE_LIMIT) return 0;
-    
-    #if USE_ADVANCED_ALLOCATOR
-    if (heap_initialized) {
-        mem_block_t* block = (mem_block_t*)((uint8_t*)ptr - sizeof(mem_block_t));
-        if (block->magic == MEM_BLOCK_MAGIC) {
-            return block->dma_safe;
-        }
-    }
-    #endif
-    
     return (phys <= DMA_ZONE_LIMIT);
 }
 
 memory_info_t get_memory_info(void) {
+    #if USE_ADVANCED_ALLOCATOR
     if (heap_initialized) {
         mem_block_t* current = heap_start;
         uint32_t used = 0;
         uint32_t free = 0;
         uint32_t free_blocks = 0;
-        uint32_t dma_safe = 0;
         
         while (current) {
             if (current->free) {
                 free += current->size;
                 free_blocks++;
-                if (current->dma_safe) {
-                    dma_safe += current->size;
-                }
             } else {
                 used += current->size;
-                if (current->dma_safe) {
-                    dma_safe += current->size;
-                }
             }
             current = current->next;
         }
         
         mem_info.heap_used = used;
         mem_info.heap_free = free;
-        mem_info.heap_dma_safe = dma_safe;
         
         if (free_blocks > 1) {
             mem_info.fragmentation = (free_blocks - 1) * 100 / free_blocks;
@@ -933,6 +945,7 @@ memory_info_t get_memory_info(void) {
             mem_info.fragmentation = 0;
         }
     }
+    #endif
     
     return mem_info;
 }
@@ -1011,10 +1024,6 @@ void memory_dump(void) {
     }
     serial_puts("\n");
     
-    serial_puts("  DMA-safe:   ");
-    serial_puts_num(info.heap_dma_safe / (1024*1024));
-    serial_puts(" MB\n");
-    
     serial_puts("  Fragmentation: ");
     serial_puts_num(info.fragmentation);
     serial_puts("%\n");
@@ -1091,10 +1100,6 @@ void memory_stats(void) {
     }
     serial_puts("\n");
     
-    serial_puts("  DMA-safe:  ");
-    serial_puts_num(info.heap_dma_safe / 1024);
-    serial_puts(" KB\n");
-    
     mem_block_t* current = heap_start;
     uint32_t total_blocks = 0;
     uint32_t free_blocks = 0;
@@ -1138,7 +1143,6 @@ void heap_validate(void) {
     
     mem_block_t* current = heap_start;
     uint32_t errors = 0;
-    uint32_t warnings = 0;
     uint32_t total_size = 0;
     uint32_t block_count = 0;
     
@@ -1153,58 +1157,37 @@ void heap_validate(void) {
         }
         
         if (current->size < sizeof(mem_block_t)) {
-            serial_puts("\n  ERROR: Block too small (");
-            serial_puts_num(current->size);
-            serial_puts(" bytes) at ");
+            serial_puts("\n  ERROR: Block too small at ");
             serial_puts_num_hex((uint32_t)current);
             errors++;
         }
         
-        if (current->next) {
-            if ((uint8_t*)current->next < (uint8_t*)current) {
-                serial_puts("\n  ERROR: Next pointer goes backward at ");
-                serial_puts_num_hex((uint32_t)current);
-                errors++;
-            }
-            
-            if (current->next->prev != current) {
-                serial_puts("\n  WARNING: Broken prev link at ");
-                serial_puts_num_hex((uint32_t)current->next);
-                warnings++;
-            }
-        }
-        
-        if (current->free && current->size < (sizeof(mem_block_t) * 2)) {
-            serial_puts("\n  WARNING: Small free block (");
-            serial_puts_num(current->size);
-            serial_puts(" bytes) at ");
-            serial_puts_num_hex((uint32_t)current);
-            warnings++;
+        if (current->next && current->next->prev != current) {
+            serial_puts("\n  WARNING: Broken prev link at ");
+            serial_puts_num_hex((uint32_t)current->next);
+            errors++;
         }
         
         current = current->next;
     }
     
-    if (total_size != heap_total_size) {
-        serial_puts("\n  ERROR: Size mismatch: expected ");
-        serial_puts_num(heap_total_size);
-        serial_puts(", calculated ");
-        serial_puts_num(total_size);
+    total_size += block_count * sizeof(mem_block_t);
+    
+    if (total_size != heap_total) {
+        serial_puts("\n  ERROR: Size mismatch");
         errors++;
     }
     
-    if (errors == 0 && warnings == 0) {
+    if (errors == 0) {
         serial_puts("PASS (");
         serial_puts_num(block_count);
         serial_puts(" blocks, ");
-        serial_puts_num(total_size / 1024);
+        serial_puts_num(heap_total / 1024);
         serial_puts(" KB)\n");
     } else {
         serial_puts("\n  FAILED: ");
         serial_puts_num(errors);
-        serial_puts(" errors, ");
-        serial_puts_num(warnings);
-        serial_puts(" warnings\n");
+        serial_puts(" errors\n");
     }
     #else
     serial_puts("[MEM] Validation not supported for simple allocator\n");
@@ -1224,8 +1207,6 @@ void debug_heap_layout(void) {
     uint32_t index = 0;
     uint32_t total_used = 0;
     uint32_t total_free = 0;
-    uint32_t dma_safe_used = 0;
-    uint32_t dma_safe_free = 0;
     
     while (current) {
         serial_puts("Block ");
@@ -1233,7 +1214,7 @@ void debug_heap_layout(void) {
         serial_puts(": 0x");
         serial_puts_num_hex((uint32_t)current);
         serial_puts(" - 0x");
-        serial_puts_num_hex((uint32_t)current + current->size);
+        serial_puts_num_hex((uint32_t)current + sizeof(mem_block_t) + current->size);
         serial_puts(" (");
         serial_puts_num(current->size);
         serial_puts(" bytes) ");
@@ -1241,15 +1222,9 @@ void debug_heap_layout(void) {
         if (current->free) {
             serial_puts("[FREE]");
             total_free += current->size;
-            if (current->dma_safe) dma_safe_free += current->size;
         } else {
             serial_puts("[USED]");
             total_used += current->size;
-            if (current->dma_safe) dma_safe_used += current->size;
-        }
-        
-        if (current->dma_safe) {
-            serial_puts(" [DMA]");
         }
         
         serial_puts("\n");
@@ -1263,13 +1238,13 @@ void debug_heap_layout(void) {
     serial_puts_num(index);
     serial_puts("\n");
     serial_puts("  Total heap:   ");
-    serial_puts_num(heap_total_size);
+    serial_puts_num(heap_total);
     serial_puts(" bytes\n");
     serial_puts("  Used:         ");
     serial_puts_num(total_used);
     serial_puts(" bytes (");
-    if (heap_total_size > 0) {
-        serial_puts_num((total_used * 100) / heap_total_size);
+    if (heap_total > 0) {
+        serial_puts_num((total_used * 100) / heap_total);
     } else {
         serial_puts("0");
     }
@@ -1277,18 +1252,12 @@ void debug_heap_layout(void) {
     serial_puts("  Free:         ");
     serial_puts_num(total_free);
     serial_puts(" bytes (");
-    if (heap_total_size > 0) {
-        serial_puts_num((total_free * 100) / heap_total_size);
+    if (heap_total > 0) {
+        serial_puts_num((total_free * 100) / heap_total);
     } else {
         serial_puts("0");
     }
     serial_puts("%)\n");
-    serial_puts("  DMA safe used: ");
-    serial_puts_num(dma_safe_used);
-    serial_puts(" bytes\n");
-    serial_puts("  DMA safe free: ");
-    serial_puts_num(dma_safe_free);
-    serial_puts(" bytes\n");
     serial_puts("===================\n");
     #endif
 }

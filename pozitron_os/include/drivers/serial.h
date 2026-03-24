@@ -10,5 +10,6 @@ void serial_write_char(char c);
 void serial_puts(const char* str);
 void serial_puts_num(uint32_t num);
 void serial_puts_num_hex(uint32_t num);
+void serial_puts_num_ulong(uint64_t num);
 
 #endif

@@ -19,8 +19,6 @@ void pci_enable_bus_master(uint8_t bus, uint8_t dev, uint8_t func);
 void pci_enable_memory_space(uint8_t bus, uint8_t dev, uint8_t func);
 void pci_enable_io_space(uint8_t bus, uint8_t dev, uint8_t func);
 pci_device_t pci_find_class(uint8_t class, uint8_t subclass, uint8_t prog_if);
+int pci_find_all_class(uint8_t class, uint8_t subclass, uint8_t prog_if, pci_device_t* devices, int max_devices);
 
-int pci_find_all_class(uint8_t class, uint8_t subclass, uint8_t prog_if, 
-                       pci_device_t* devices, int max_devices);
-
-#endif // PCI_H
+#endif

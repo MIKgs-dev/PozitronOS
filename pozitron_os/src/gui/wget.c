@@ -310,7 +310,7 @@ Widget* wg_create_input(Window* parent, float rel_x, float rel_y,
     input->selection_end = input->cursor_pos;
     input->cursor_visible = 1;
     input->cursor_blink_time = 0;
-    input->password_mode = 0;
+    input->password_mode = 0;  // По умолчанию выключен
     input->password_char = '*';
     input->scroll_offset = 0;
     input->multiline = 0;
@@ -321,6 +321,15 @@ Widget* wg_create_input(Window* parent, float rel_x, float rel_y,
     widget->data_size = sizeof(InputData);
     
     return widget;
+}
+
+// Функция для установки парольного режима
+void wg_input_set_password_mode(Widget* input, uint8_t enabled) {
+    if (!input || input->type != WIDGET_INPUT || !input->data) return;
+    
+    InputData* data = (InputData*)input->data;
+    data->password_mode = enabled ? 1 : 0;
+    input->needs_redraw = 1;
 }
 
 void wg_input_set_text(Widget* input, const char* text) {

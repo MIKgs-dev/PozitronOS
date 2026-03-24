@@ -130,6 +130,25 @@ void paging_init(void) {
         if (frame < total_frames) set_frame(frame);
     }
     
+    serial_puts("[PAGING] Mapping IVT and BDA...\n");
+    for (uint32_t addr = 0x0; addr < 0x500; addr += PAGE_SIZE) {
+        uint32_t dir_idx = (addr >> 22) & 0x3FF;
+        uint32_t table_idx = (addr >> 12) & 0x3FF;
+        
+        if (!(kernel_directory->entries[dir_idx] & PAGE_PRESENT)) {
+            page_table_t* table = (page_table_t*)kmalloc_aligned(sizeof(page_table_t), PAGE_SIZE);
+            if (!table) {
+                serial_puts("[PAGING] Failed to allocate page table for IVT\n");
+                return;
+            }
+            memset(table->entries, 0, sizeof(table->entries));
+            kernel_directory->entries[dir_idx] = (uint32_t)table | PAGE_PRESENT | PAGE_WRITABLE;
+        }
+        
+        page_table_t* table = (page_table_t*)(kernel_directory->entries[dir_idx] & 0xFFFFF000);
+        table->entries[table_idx] = addr | PAGE_PRESENT;
+    }
+    
     serial_puts("[PAGING] Mapping video memory...\n");
     for (uint32_t addr = 0xA0000; addr < 0xC0000; addr += PAGE_SIZE) {
         uint32_t dir_idx = (addr >> 22) & 0x3FF;
@@ -147,6 +166,44 @@ void paging_init(void) {
         
         page_table_t* table = (page_table_t*)(kernel_directory->entries[dir_idx] & 0xFFFFF000);
         table->entries[table_idx] = addr | PAGE_PRESENT | PAGE_WRITABLE;
+    }
+    
+    serial_puts("[PAGING] Mapping EBDA area...\n");
+    for (uint32_t addr = 0x80000; addr < 0xA0000; addr += PAGE_SIZE) {
+        uint32_t dir_idx = (addr >> 22) & 0x3FF;
+        uint32_t table_idx = (addr >> 12) & 0x3FF;
+        
+        if (!(kernel_directory->entries[dir_idx] & PAGE_PRESENT)) {
+            page_table_t* table = (page_table_t*)kmalloc_aligned(sizeof(page_table_t), PAGE_SIZE);
+            if (!table) {
+                serial_puts("[PAGING] Failed to allocate page table for EBDA\n");
+                return;
+            }
+            memset(table->entries, 0, sizeof(table->entries));
+            kernel_directory->entries[dir_idx] = (uint32_t)table | PAGE_PRESENT | PAGE_WRITABLE;
+        }
+        
+        page_table_t* table = (page_table_t*)(kernel_directory->entries[dir_idx] & 0xFFFFF000);
+        table->entries[table_idx] = addr | PAGE_PRESENT;
+    }
+    
+    serial_puts("[PAGING] Mapping BIOS area...\n");
+    for (uint32_t addr = 0xE0000; addr < 0x100000; addr += PAGE_SIZE) {
+        uint32_t dir_idx = (addr >> 22) & 0x3FF;
+        uint32_t table_idx = (addr >> 12) & 0x3FF;
+        
+        if (!(kernel_directory->entries[dir_idx] & PAGE_PRESENT)) {
+            page_table_t* table = (page_table_t*)kmalloc_aligned(sizeof(page_table_t), PAGE_SIZE);
+            if (!table) {
+                serial_puts("[PAGING] Failed to allocate page table for BIOS\n");
+                return;
+            }
+            memset(table->entries, 0, sizeof(table->entries));
+            kernel_directory->entries[dir_idx] = (uint32_t)table | PAGE_PRESENT | PAGE_WRITABLE;
+        }
+        
+        page_table_t* table = (page_table_t*)(kernel_directory->entries[dir_idx] & 0xFFFFF000);
+        table->entries[table_idx] = addr | PAGE_PRESENT;
     }
     
     struct fb_info* fb = vesa_get_info();
@@ -180,12 +237,9 @@ void paging_init(void) {
         }
     }
     
-    // Маппим кучу (heap)
-    extern uint32_t heap_start;
+    serial_puts("[PAGING] Mapping heap: 0x");
     uint32_t heap_phys = (uint32_t)heap_start & 0xFFFFF000;
     uint32_t heap_end = ((uint32_t)heap_start + mem_info.heap_size + PAGE_SIZE - 1) & 0xFFFFF000;
-    
-    serial_puts("[PAGING] Mapping heap: 0x");
     serial_puts_num_hex(heap_phys);
     serial_puts(" - 0x");
     serial_puts_num_hex(heap_end);
@@ -300,9 +354,6 @@ void paging_init(void) {
                     uint32_t size = get_bar_size(dev->pci.bus, dev->pci.device, 
                                                  dev->pci.function, i);
                     if (size == 0 || size > 0x10000000) {
-                        serial_puts("[PAGING]   WARNING: Suspicious BAR size ");
-                        serial_puts_num_hex(size);
-                        serial_puts(", limiting to 4KB\n");
                         size = 0x1000;
                     }
                     
@@ -409,34 +460,6 @@ void page_fault_handler(registers_t* r) {
     
     if (r->err_code & 0x4) serial_puts("  User mode\n");
     else serial_puts("  Supervisor mode\n");
-    
-    // Проверяем, не в AHCI ли BAR случился fault
-    if (fault_addr >= 0xE1004000 && fault_addr < 0xE1006000) {
-        serial_puts("\n*** AHCI BAR FAULT DETECTED ***\n");
-        serial_puts("Checking page tables...\n");
-        
-        uint32_t dir_idx = (fault_addr >> 22) & 0x3FF;
-        uint32_t table_idx = (fault_addr >> 12) & 0x3FF;
-        
-        uint32_t dir_entry = current_directory->entries[dir_idx];
-        serial_puts("Directory entry: 0x"); serial_puts_num_hex(dir_entry); serial_puts("\n");
-        
-        if (dir_entry & PAGE_PRESENT) {
-            page_table_t* table = (page_table_t*)(dir_entry & 0xFFFFF000);
-            uint32_t table_entry = table->entries[table_idx];
-            serial_puts("Table entry: 0x"); serial_puts_num_hex(table_entry); serial_puts("\n");
-            
-            if (table_entry & PAGE_PRESENT) {
-                serial_puts("  Page PRESENT!\n");
-                if (!(table_entry & PAGE_CACHE_DISABLE)) {
-                    serial_puts("  CACHE ENABLED! This is the problem\n");
-                }
-                if (!(table_entry & PAGE_WRITETHROUGH)) {
-                    serial_puts("  WRITE-THROUGH disabled\n");
-                }
-            }
-        }
-    }
     
     serial_puts("\nSystem halted.\n");
     asm volatile("cli; hlt");

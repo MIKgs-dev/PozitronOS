@@ -1,46 +1,46 @@
-#ifndef DISK_H
-#define DISK_H
-
+#pragma once
 #include <stdint.h>
 
-#define MAX_DISKS 8
-#define DISK_NAME_LEN 64
-
 typedef enum {
-    DISK_TYPE_AHCI,
-    DISK_TYPE_ATA_PIO,
-    DISK_TYPE_UNKNOWN
+    DISK_TYPE_NONE = 0,
+    DISK_TYPE_ATA,
+    DISK_TYPE_ATAPI,
+    DISK_TYPE_SATA,
+    DISK_TYPE_AHCI
 } disk_type_t;
 
-typedef struct {
-    uint8_t present;
+typedef struct disk {
+    uint32_t id;
     disk_type_t type;
-    uint8_t bus;          // для AHCI: порт, для ATA PIO: 0/1 (primary/secondary)
-    uint8_t device;       // для AHCI: 0, для ATA PIO: 0/1 (master/slave)
-    uint64_t total_sectors;
-    uint32_t sector_size; // обычно 512
-    uint32_t size_mb;     // total_sectors * sector_size / 1048576
+    uint64_t sectors;
+    uint32_t sector_size;
     char model[41];
-    uint8_t removable;
-} disk_info_t;
+    char serial[21];
+    
+    int (*read)(struct disk* disk, uint64_t lba, uint32_t count, void* buffer);
+    int (*write)(struct disk* disk, uint64_t lba, uint32_t count, void* buffer);
+    int (*flush)(struct disk* disk);
+    
+    void* private_data;
+    int private_id;
+} disk_t;
 
-// Инициализация диск-менеджера
 void disk_init(void);
-
-// Регистрация нового диска (вызывается из драйвера)
-int disk_register(disk_type_t type, uint8_t bus, uint8_t device,
-                  uint64_t total_sectors, const char* model, uint8_t removable);
-
-// Получить общее количество дисков
+disk_t* disk_get(int index);
 int disk_get_count(void);
+void disk_dump_all(void);
 
-// Получить информацию о диске по индексу
-const disk_info_t* disk_get_info(int index);
+static inline int disk_read(disk_t* disk, uint64_t lba, uint32_t count, void* buffer) {
+    if (!disk || !disk->read) return -1;
+    return disk->read(disk, lba, count, buffer);
+}
 
-// Чтение секторов с диска (индекс диска, LBA, количество, буфер)
-int disk_read(int disk_num, uint64_t lba, uint32_t count, void* buffer);
+static inline int disk_write(disk_t* disk, uint64_t lba, uint32_t count, void* buffer) {
+    if (!disk || !disk->write) return -1;
+    return disk->write(disk, lba, count, buffer);
+}
 
-// Запись секторов на диск
-int disk_write(int disk_num, uint64_t lba, uint32_t count, const void* buffer);
-
-#endif
+static inline int disk_flush(disk_t* disk) {
+    if (!disk || !disk->flush) return -1;
+    return disk->flush(disk);
+}

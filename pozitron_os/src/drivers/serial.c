@@ -86,3 +86,22 @@ void serial_puts_num_hex(uint32_t num) {
         serial_write(buffer[i]);
     }
 }
+
+void serial_puts_num_ulong(uint64_t num) {
+    char buf[21];
+    int i = 0;
+    
+    if (num == 0) {
+        serial_write('0');
+        return;
+    }
+    
+    while (num > 0 && i < 20) {
+        buf[i++] = '0' + (num % 10);
+        num /= 10;
+    }
+    
+    while (i > 0) {
+        serial_write(buf[--i]);
+    }
+}

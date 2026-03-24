@@ -177,6 +177,82 @@ static int is_printable(uint8_t scancode) {
     return 1;
 }
 
+// ============ УПРАВЛЕНИЕ СВЕТОДИОДАМИ ============
+
+// Ожидание готовности контроллера к отправке команды
+static void keyboard_wait_write(void) {
+    uint32_t timeout = 100000;
+    while (--timeout) {
+        if (!(inb(KEYBOARD_STATUS_PORT) & 0x02)) { // Бит 2 = Input buffer full
+            return;
+        }
+        asm volatile("pause");
+    }
+    serial_puts("[KBD] Timeout waiting for write\n");
+}
+
+// Ожидание данных от клавиатуры (ACK)
+static uint8_t keyboard_wait_read(void) {
+    uint32_t timeout = 100000;
+    while (--timeout) {
+        if (inb(KEYBOARD_STATUS_PORT) & 0x01) { // Бит 1 = Output buffer full
+            return inb(KEYBOARD_DATA_PORT);
+        }
+        asm volatile("pause");
+    }
+    serial_puts("[KBD] Timeout waiting for read\n");
+    return 0;
+}
+
+// Отправка команды установки светодиодов
+static void keyboard_update_leds(void) {
+    // Не отправляем команду, если клавиатура ещё не готова (на всякий случай)
+    // Но в целом это должно работать.
+    
+    serial_puts("[KBD] Updating LEDs: Caps=");
+    serial_puts_num(kbd_state.caps);
+    serial_puts(" Num=");
+    serial_puts_num(kbd_state.numlock);
+    serial_puts(" Scroll=");
+    serial_puts_num(kbd_state.scrolllock);
+    serial_puts("\n");
+
+    // 1. Ждем готовности к отправке команды
+    keyboard_wait_write();
+    
+    // 2. Отправляем команду 0xED
+    outb(KEYBOARD_DATA_PORT, 0xED);
+    
+    // 3. Ждем ACK (0xFA) от клавиатуры
+    uint8_t ack = keyboard_wait_read();
+    if (ack != 0xFA) {
+        serial_puts("[KBD] LED command failed (no ACK). Response: 0x");
+        serial_puts_num_hex(ack);
+        serial_puts("\n");
+        return;
+    }
+    
+    // 4. Формируем байт светодиодов
+    uint8_t led_byte = 0;
+    if (kbd_state.scrolllock) led_byte |= 1; // Scroll Lock = бит 0
+    if (kbd_state.numlock)     led_byte |= 2; // Num Lock    = бит 1
+    if (kbd_state.caps)        led_byte |= 4; // Caps Lock   = бит 2
+    
+    // 5. Ждем готовности к отправке данных
+    keyboard_wait_write();
+    
+    // 6. Отправляем байт светодиодов
+    outb(KEYBOARD_DATA_PORT, led_byte);
+    
+    // 7. Ждем финальный ACK (опционально, но для надежности)
+    ack = keyboard_wait_read();
+    if (ack != 0xFA) {
+        serial_puts("[KBD] LED data command failed (no ACK). Response: 0x");
+        serial_puts_num_hex(ack);
+        serial_puts("\n");
+    }
+}
+
 void keyboard_handler(registers_t* regs) {
     (void)regs;
     
@@ -203,16 +279,19 @@ void keyboard_handler(registers_t* regs) {
         case SCAN_CAPSLOCK:
             if (!released) {
                 kbd_state.caps = !kbd_state.caps;
+                keyboard_update_leds();
             }
             break;
         case SCAN_NUMLOCK:
             if (!released) {
                 kbd_state.numlock = !kbd_state.numlock;
+                keyboard_update_leds();
             }
             break;
         case SCAN_SCROLLLOCK:
             if (!released) {
                 kbd_state.scrolllock = !kbd_state.scrolllock;
+                keyboard_update_leds();
             }
             break;
     }
