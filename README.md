@@ -1,9 +1,8 @@
 PozitronOS
 
-<img width="655" height="493" alt="Снимок экрана (79)" src="https://github.com/user-attachments/assets/e86fae2a-638a-434e-869f-c5faa281aeee" />
-<img width="651" height="490" alt="Снимок экрана (83)" src="https://github.com/user-attachments/assets/8decb6cf-2e49-42f9-afae-852f775d722d" />
-<img width="650" height="491" alt="Снимок экрана (82)" src="https://github.com/user-attachments/assets/245700c7-375d-4089-9d42-89d3de41719d" />
-<img width="650" height="491" alt="Снимок экрана (80)" src="https://github.com/user-attachments/assets/c8eaf0ac-c9c5-4b76-b51d-388912d8c94a" />
+<img width="646" height="488" alt="Снимок экрана (99)" src="https://github.com/user-attachments/assets/744ada9e-6eda-4be6-bcb4-b3cc6b9402db" />
+<img width="649" height="487" alt="Снимок экрана (98)" src="https://github.com/user-attachments/assets/2569a303-d214-4e38-acc3-6092a7948a58" />
+<img width="1036" height="780" alt="Снимок экрана (100)" src="https://github.com/user-attachments/assets/99b4bff4-512b-49c1-894e-ee6235abfdc3" />
 
 PozitronOS - современная операционная система, написанная МИК gs с использованием искуственного интеллекта Deep Seek. Обычному пользователю может казаться, что ОС, написанная ИИ очень плохая и чем то
 подобным лучше не пользоваться, но это не так. На самом деле ИИ сам по себе не может написать ОС без человека. Наша команда не просто заставляет ИИ писать всю ОС - мы, помимо использования ИИ,
