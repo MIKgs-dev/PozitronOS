@@ -1,0 +1,84 @@
+#include "drivers/timer.h"
+#include "kernel/ports.h"
+#include "drivers/vga.h"
+#include "drivers/pic.h"
+#include "drivers/serial.h"
+#include "core/event.h"
+#include "kernel/scheduler.h"
+#include "kernel/callout.h"
+
+static uint32_t timer_ticks = 0;
+
+// Инициализация таймера
+void timer_init(uint32_t frequency) {
+    // Устанавливаем обработчик прерывания таймера (IRQ0)
+    irq_install_handler(0, timer_handler);
+    
+    // Вычисляем делитель
+    uint32_t divisor = 1193180 / frequency;
+    
+    // Отправляем команду настройки в PIT
+    outb(PIT_COMMAND, PIT_MODE3);
+    
+    // Отправляем делитель (младший и старший байты)
+    outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFF));
+    outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
+    
+    serial_puts("[TIMER] Initialized at ");
+    serial_puts_num(frequency);
+    serial_puts(" Hz\n");
+}
+
+// Обработчик прерывания таймера
+void timer_handler(registers_t* regs) {
+    (void)regs;
+    
+    timer_ticks++;
+
+    callout_process(timer_ticks);
+
+    scheduler_tick();
+    
+    if (timer_ticks % 10 == 0) {
+        event_t event;
+        event.type = EVENT_TIMER_TICK;
+        event.data1 = timer_ticks;
+        event.data2 = 0;
+        event_post(event);
+    }
+    
+    pic_send_eoi(0);
+}
+
+// Получить текущее количество тиков
+uint32_t timer_get_ticks(void) {
+    return timer_ticks;
+}
+
+// Ждать указанное количество тиков
+void timer_wait(uint32_t ticks) {
+    uint32_t end_ticks = timer_ticks + ticks;
+    while (timer_ticks < end_ticks) {
+        asm volatile ("hlt");
+    }
+}
+
+// Задержка в миллисекундах
+void timer_sleep_ms(uint32_t milliseconds) {
+    uint32_t ticks = milliseconds / 10;
+    if (ticks < 1) ticks = 1;
+    uint32_t start = timer_get_ticks();
+    while (timer_get_ticks() - start < ticks) {
+        asm volatile("pause");
+    }
+}
+
+void timer_sleep_us(uint32_t microseconds) {
+    /* Грубо, но для EHCI пойдёт */
+    uint32_t ticks = microseconds / 10000;
+    if (ticks < 1) ticks = 1;
+    uint32_t start = timer_get_ticks();
+    while (timer_get_ticks() - start < ticks) {
+        asm volatile("pause");
+    }
+}
